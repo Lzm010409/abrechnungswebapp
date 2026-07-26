@@ -1,0 +1,25 @@
+{
+  "name": "abrechnungswebapp",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Monatliche Belegabrechnung auf Basis der sevDesk-Bankbuchungen",
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/web"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "npm run build -w @abrechnung/shared && npm run build -w @abrechnung/server && npm run build -w @abrechnung/web",
+    "dev": "concurrently -n server,web -c blue,magenta \"npm run dev -w @abrechnung/server\" \"npm run dev -w @abrechnung/web\"",
+    "start": "node packages/server/dist/index.js",
+    "test": "npm run test -w @abrechnung/server",
+    "typecheck": "tsc -b packages/shared packages/server packages/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}

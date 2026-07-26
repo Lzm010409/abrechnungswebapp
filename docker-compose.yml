@@ -1,0 +1,25 @@
+services:
+  abrechnung:
+    build: .
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    environment:
+      # Pflicht
+      SEVDESK_API_TOKEN: ${SEVDESK_API_TOKEN:?SEVDESK_API_TOKEN fehlt}
+      # Optional - leer lassen, dann waehlt der Server das Konto selbst
+      SEVDESK_CHECK_ACCOUNT_ID: ${SEVDESK_CHECK_ACCOUNT_ID:-}
+      # Optional - Rechnungsabruf aus dem OneDrive-Gutachtenordner
+      N8N_FIND_RECHNUNG_URL: ${N8N_FIND_RECHNUNG_URL:-}
+      N8N_WEBHOOK_AUTH_HEADER: ${N8N_WEBHOOK_AUTH_HEADER:-}
+      N8N_WEBHOOK_AUTH_VALUE: ${N8N_WEBHOOK_AUTH_VALUE:-}
+      # Optional - kann jederzeit spaeter nachgetragen werden
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5}
+      ANTHROPIC_EFFORT: ${ANTHROPIC_EFFORT:-high}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - abrechnung-daten:/data
+
+volumes:
+  abrechnung-daten:
