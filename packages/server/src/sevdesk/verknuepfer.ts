@@ -3,6 +3,7 @@ import type {
   BuchungsTyp,
   MonatsSummen,
   Position,
+  SevdeskStatus,
 } from '@abrechnung/shared';
 import {
   extrahiereAusVerwendungszweck,
@@ -59,6 +60,7 @@ function baueEinePosition(
   const typ: BuchungsTyp = betrag >= 0 ? 'EINGANG' : 'AUSGANG';
   const datum = tx.valueDate.slice(0, 10);
   const verwendungszweck = tx.paymtPurpose ?? '';
+  const sevdeskStatus = leseSevdeskStatus(tx.status);
 
   const voucherId = eingabe.voucherProTransaktion.get(tx.id);
   let invoiceId = eingabe.invoiceProTransaktion.get(tx.id);
@@ -107,8 +109,17 @@ function baueEinePosition(
     }
   }
 
-  if (typ === 'AUSGANG' && !voucherId) {
-    hinweis = 'Kein Beleg in sevDesk verknuepft';
+  // Eine Buchung ohne Beleg hat zwei sehr verschiedene Ursachen. Der Hinweis
+  // muss sagen, wo die Korrektur hingehoert - in sevDesk oder hier.
+  if (!voucherId && !invoiceId) {
+    if (sevdeskStatus === 'offen') {
+      hinweis =
+        'In sevDesk noch nicht zugeordnet. Dort verbuchen, danach diesen Monat neu laden.';
+    } else if (sevdeskStatus === 'privat') {
+      hinweis = 'In sevDesk als privat markiert.';
+    } else if (typ === 'AUSGANG') {
+      hinweis = 'Kein Beleg in sevDesk verknuepft';
+    }
   }
 
   const voucher = voucherId ? idx.voucherNachId.get(voucherId) : undefined;
@@ -122,6 +133,7 @@ function baueEinePosition(
     verwendungszweck,
     gegenkonto: tx.payeePayerName ?? voucher?.supplierName ?? undefined,
     typ,
+    sevdeskStatus,
     voucherId,
     invoiceId,
     rechnungsnummer: invoice?.invoiceNumber ?? undefined,
@@ -137,23 +149,51 @@ function baueEinePosition(
 
 /**
  * Setzt den Ampelstatus anhand der tatsaechlich vorhandenen Dateien.
- * Wird nach dem Download aufgerufen; manuelle Entscheidungen bleiben unangetastet.
+ *
+ * `statusManuellGesetzt` darf nur true sein, wenn der Nutzer den Status selbst
+ * bestimmt hat. Es genuegt ausdruecklich NICHT, dass irgendeine Korrektur an
+ * der Position vorliegt: wer einen Beleg nachreicht oder aus den Kandidaten
+ * waehlt, erwartet, dass die Ampel danach auf gruen springt.
  */
-export function aktualisiereStatus(position: Position): Position {
-  if (position.status === 'ignoriert' || position.manuellBestaetigt) {
+export function aktualisiereStatus(
+  position: Position,
+  statusManuellGesetzt = false,
+): Position {
+  if (position.status === 'ignoriert' || statusManuellGesetzt) {
     return position;
   }
 
-  const anzahlDateien = position.dateien.length;
-  const anzahlKandidaten = position.kandidaten?.length ?? 0;
-
-  if (anzahlDateien === 0) {
+  if (position.dateien.length === 0) {
     return { ...position, status: 'offen' };
   }
-  if (anzahlKandidaten > 0 || (position.aktenzeichenKandidaten?.length ?? 0) > 1) {
-    return { ...position, status: 'mehrdeutig' };
+
+  // Hat der Nutzer bereits gewaehlt, ist nichts mehr mehrdeutig - auch wenn
+  // weitere Kandidaten zur Ansicht stehenbleiben.
+  if (position.auswahlBestaetigt) {
+    return { ...position, status: 'ok' };
   }
-  return { ...position, status: 'ok' };
+
+  const offeneAuswahl =
+    (position.kandidaten?.length ?? 0) > 0 ||
+    (position.aktenzeichenKandidaten?.length ?? 0) > 1;
+
+  return { ...position, status: offeneAuswahl ? 'mehrdeutig' : 'ok' };
+}
+
+/** sevDesk-Statuscode der Buchung in eine sprechende Form uebersetzen. */
+function leseSevdeskStatus(code: string | null | undefined): SevdeskStatus {
+  switch (String(code ?? '')) {
+    case '100':
+      return 'offen';
+    case '200':
+      return 'verknuepft';
+    case '300':
+      return 'privat';
+    case '400':
+      return 'verbucht';
+    default:
+      return 'unbekannt';
+  }
 }
 
 export function berechneSummen(positionen: Position[]): MonatsSummen {
@@ -178,6 +218,7 @@ export function berechneSummen(positionen: Position[]): MonatsSummen {
     anzahlMehrdeutig: zaehle('mehrdeutig'),
     anzahlOffen: zaehle('offen'),
     anzahlIgnoriert: zaehle('ignoriert'),
+    anzahlNichtZugeordnet: relevant.filter((p) => p.sevdeskStatus === 'offen').length,
   };
 }
 

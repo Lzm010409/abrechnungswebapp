@@ -17,6 +17,7 @@ function position(teil: Partial<Position> & { id: string }): Position {
     waehrung: 'EUR',
     verwendungszweck: 'Test',
     typ: 'EINGANG',
+    sevdeskStatus: 'verknuepft',
     dateien: [],
     status: 'ok',
     manuellBestaetigt: false,
@@ -43,7 +44,8 @@ function monat(teil: Partial<Monat> = {}): Monat {
     positionen: [],
     summen: {
       einnahmen: 0, ausgaben: 0, saldo: 0,
-      anzahlGesamt: 0, anzahlOk: 0, anzahlMehrdeutig: 0, anzahlOffen: 0, anzahlIgnoriert: 0,
+      anzahlGesamt: 0, anzahlOk: 0, anzahlMehrdeutig: 0, anzahlOffen: 0,
+      anzahlIgnoriert: 0, anzahlNichtZugeordnet: 0,
     },
     verwaisteBelege: [],
     kontoauszuege: [],

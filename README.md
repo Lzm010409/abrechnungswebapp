@@ -120,6 +120,40 @@ Bestätigen wie im alten Skill.
 **Manuelle Korrekturen überleben jeden Neuabruf.** „Aus sevDesk laden" holt die
 Buchungen frisch, lässt eingetragene Aktenzeichen, Belegzuordnungen und
 Ausblendungen aber unangetastet — sie liegen getrennt in der `overrides`-Tabelle.
+Im Cache stehen ausschließlich die Rohdaten aus sevDesk, sodass sich jede
+Korrektur jederzeit wieder zurücknehmen lässt.
+
+### Noch nicht zugeordnete Buchungen
+
+Ein Monat ist selten beim ersten Laden fertig: Buchungen, die in sevDesk noch
+keiner Rechnung und keinem Beleg zugeordnet sind, kann die App nicht auflösen.
+Sie werden deshalb ausdrücklich von „Beleg fehlt" unterschieden — sonst sucht
+man den Fehler an der falschen Stelle.
+
+* In der Tabelle tragen sie die Marke **sevDesk** und den Text `nicht verbucht`.
+* Über der Liste erscheint ein Hinweisbanner mit der Anzahl und einem
+  Direktlink zum Neuladen.
+* `summen.anzahlNichtZugeordnet` zählt sie getrennt.
+
+Der Ablauf ist damit: in sevDesk verbuchen → hier „Aus sevDesk laden" → die
+Zuordnung und die Belege werden übernommen.
+
+### Status eines Monats abfragen
+
+Ohne sevDesk-Abruf, für Übersichten und zum Nachschauen, ob ein Monat fertig ist:
+
+```
+GET /api/months/2026-06/status
+→ { "monat": "2026-06", "geladen": true,
+    "synchronisiertAm": "2026-07-26T20:27:50.683Z",
+    "summen": { …, "anzahlNichtZugeordnet": 1 },
+    "abgeschlossen": false, "anzahlKontoauszuege": 1 }
+
+GET /api/months?von=2026-01&bis=2026-12     # Jahresübersicht
+```
+
+`abgeschlossen` ist genau dann `true`, wenn keine Buchung mehr offen,
+mehrdeutig oder in sevDesk unzugeordnet ist.
 
 ### Kontoauszüge
 
@@ -165,10 +199,27 @@ Zweifelsfälle — Beträge, Verknüpfungen und Summen kommen aus sevDesk.
 npm test
 ```
 
-63 Tests decken die risikoreichen Stellen ab: Aktenzeichen-Normalisierung und
-Retry-Kette, die Verknüpfungslogik, den Rechnungsabruf inklusive
-Mehrfachtreffer-Auflösung, und den PDF-Zusammenbau gegen echte PDF-Dateien
-(inklusive beschädigter Dateien und Sonderzeichen).
+148 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
+n8n-Webhooks, sodass die gesamte Kette geprüft wird —
+
+```
+HTTP-Route → MonatsDienst → sevDesk-Client → Mock-sevDesk
+                          → RechnungsProvider → Mock-n8n
+                          → Dateiablage → SQLite → PDF
+```
+
+Abgedeckt sind unter anderem: Bankkonto-Ermittlung samt Mehrdeutigkeit,
+Zeitzonen-Randfälle an Monatsgrenzen, Paginierung über 100 Datensätze hinaus,
+unzugeordnete Buchungen und ihre Auflösung nach dem Verbuchen in sevDesk,
+manuelle Korrekturen samt Zurücknehmen, Kandidatenauswahl, Kontoauszug-Upload,
+PDF-Zusammenbau in korrekter Reihenfolge, Betrieb ohne n8n, Betrieb ohne
+KI-Key, sowie sevDesk-Ausfälle (404/500).
+
+Der KI-Layer wird gegen einen lokalen Nachbau des Claude-Endpunkts geprüft:
+verifiziert werden Modell, adaptives Thinking, das Fehlen der entfernten
+Sampling-Parameter, `output_config` mit JSON-Schema und der PDF-Dokumentblock.
+Ein echter API-Aufruf findet dabei nicht statt.
 
 ---
 
@@ -185,15 +236,23 @@ erzeugte PDFs.
 
 ## Offene Punkte
 
-**Der Live-Spike gegen die sevDesk-API steht noch aus.** Die Session, in der
-dieser Code entstanden ist, hatte keinen Netzwerkzugriff auf `my.sevdesk.de`
-(Egress-Policy der Session). Zwei Stellen sind daher gegen die Dokumentation
-gebaut und beim ersten Lauf gegen den echten Account zu prüfen — beide sind im
-Code mit `SPIKE:` markiert:
+**Der Live-Lauf gegen die echte sevDesk-API steht noch aus.** Die Session, in
+der dieser Code entstanden ist, kam nicht an `my.sevdesk.de` heran (die
+Egress-Policy lehnte den Verbindungsaufbau durchgehend mit 403 ab). Getestet
+wurde daher gegen einen Nachbau der API, der ihre Eigenheiten abbildet:
+`{objects:…}`-Hülle, Beträge als Strings, Paginierung, Zeitstempel mit Offset.
+
+Zwei Annahmen über die echte API konnten damit nicht verifiziert werden. Beide
+sind im Code mit `SPIKE:` markiert und jeweils so abgesichert, dass ein Irrtum
+die Abrechnung nicht verfälscht:
 
 | Stelle | Annahme | Absicherung falls falsch |
 |---|---|---|
-| `GET /CheckAccountTransaction` Datumsfilter | Unix-Sekunden in `startDate`/`endDate` | zusätzlicher clientseitiger Filter — das Ergebnis stimmt in jedem Fall, es werden nur zu viele Datensätze geholt |
-| `GET /Invoice/{id}/getCheckAccountTransactions` | existiert analog zu `/Voucher/...` | 404/400 wird abgefangen; die Zuordnung läuft dann über das Aktenzeichen im Verwendungszweck |
+| `GET /CheckAccountTransaction` Datumsfilter | Unix-Sekunden in `startDate`/`endDate` | Das Fenster wird serverseitig um zwei Tage geweitet, die exakte Abgrenzung macht ein clientseitiger Filter auf dem Datumsteil. Ergebnis stimmt in jedem Fall; schlimmstenfalls werden zu viele Datensätze geholt. |
+| `GET /Invoice/{id}/getCheckAccountTransactions` | existiert analog zu `/Voucher/…` | 404/400 wird abgefangen; die Zuordnung läuft dann über das Aktenzeichen im Verwendungszweck. Ein E2E-Test deckt genau diesen Fall ab. |
 
 Die Verknüpfung `Voucher → Buchungen` ist dokumentiert und damit gesichert.
+
+**Beim ersten echten Lauf zu prüfen:** ob die Positionsanzahl eines Monats zum
+Kontoauszug passt (Datumsfilter) und ob `sevdeskStatus` plausible Werte zeigt
+(Statuscodes 100/200/300/400).

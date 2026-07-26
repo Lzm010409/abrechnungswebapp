@@ -81,9 +81,10 @@ export function App() {
             <span className="negativ">−{euro(s.ausgaben)}</span>
             <span className="saldo">{euro(s.saldo)}</span>
             <span className="zaehler">
-              <span className="ampel ok">●</span> {s.anzahlOk}
-              <span className="ampel mehrdeutig">●</span> {s.anzahlMehrdeutig}
-              <span className="ampel offen">●</span> {s.anzahlOffen}
+              <span className="ampel ok" title="Beleg zugeordnet">●</span> {s.anzahlOk}
+              <span className="ampel mehrdeutig" title="Entscheidung nötig">●</span>{' '}
+              {s.anzahlMehrdeutig}
+              <span className="ampel offen" title="Kein Beleg">●</span> {s.anzahlOffen}
             </span>
           </div>
         )}
@@ -96,6 +97,30 @@ export function App() {
           </div>
         )}
       </header>
+
+      {/*
+        Der wichtigste Hinweis des Monats: sind Buchungen in sevDesk noch nicht
+        zugeordnet, gehoert die Korrektur dorthin und nicht hierher. Ohne diesen
+        Hinweis sucht man den Fehler an der falschen Stelle.
+      */}
+      {s && s.anzahlNichtZugeordnet > 0 && (
+        <div className="banner warnung">
+          {s.anzahlNichtZugeordnet} Buchung
+          {s.anzahlNichtZugeordnet === 1 ? '' : 'en'} in sevDesk noch nicht zugeordnet.
+          Dort verbuchen, dann hier neu laden.
+          <button
+            className="inline"
+            disabled={laedt}
+            onClick={() =>
+              mitLadeanzeige(async () => {
+                setDaten(await api.synchronisiere(monat));
+              })
+            }
+          >
+            Jetzt neu laden
+          </button>
+        </div>
+      )}
 
       {fehler && (
         <div className="banner fehler">

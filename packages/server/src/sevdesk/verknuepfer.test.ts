@@ -188,6 +188,7 @@ describe('aktualisiereStatus', () => {
     waehrung: 'EUR',
     verwendungszweck: '',
     typ: 'EINGANG',
+    sevdeskStatus: 'verknuepft',
     dateien: [],
     status: 'offen',
     manuellBestaetigt: false,
@@ -218,8 +219,28 @@ describe('aktualisiereStatus', () => {
     expect(p.status).toBe('mehrdeutig');
   });
 
-  it('respektiert eine manuelle Entscheidung', () => {
-    const p = aktualisiereStatus({ ...basis, manuellBestaetigt: true, status: 'ok' });
+  it('haelt einen ausdruecklich gesetzten Status fest', () => {
+    const p = aktualisiereStatus({ ...basis, status: 'ok' }, true);
+    expect(p.status).toBe('ok');
+  });
+
+  it('berechnet den Status trotz anderer Korrekturen neu', () => {
+    // Regression: zuvor fror jede manuelle Aenderung den Status ein. Wer einen
+    // Beleg nachreicht, erwartet aber, dass die Ampel auf gruen springt.
+    const p = aktualisiereStatus(
+      { ...basis, manuellBestaetigt: true, dateien: [datei] },
+      false,
+    );
+    expect(p.status).toBe('ok');
+  });
+
+  it('beendet die Mehrdeutigkeit, sobald der Nutzer gewaehlt hat', () => {
+    const p = aktualisiereStatus({
+      ...basis,
+      dateien: [datei],
+      kandidaten: [{ ...datei, id: 'd2' }],
+      auswahlBestaetigt: true,
+    });
     expect(p.status).toBe('ok');
   });
 
@@ -237,6 +258,7 @@ describe('berechneSummen', () => {
     waehrung: 'EUR',
     verwendungszweck: '',
     typ: betrag >= 0 ? 'EINGANG' : 'AUSGANG',
+    sevdeskStatus: 'verknuepft',
     dateien: [],
     status,
     manuellBestaetigt: false,

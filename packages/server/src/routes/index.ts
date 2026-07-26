@@ -6,6 +6,7 @@ import type { Datenbank } from '../db/index.js';
 import type { MonatsDienst } from '../monatsdienst.js';
 import { baueAbrechnungsPdf } from '../pdf/build.js';
 import type { CheckAccount } from '../sevdesk/types.js';
+import { EingabeFehler, NichtGefunden } from '../fehler.js';
 import type { Dateiablage } from '../storage/dateien.js';
 
 export interface RoutenKontext {
@@ -21,19 +22,23 @@ export interface RoutenKontext {
 /** Wirft einen 400er, wenn der Monatsparameter nicht YYYY-MM ist. */
 function pruefeMonat(monat: string): string {
   if (!istGueltigerMonat(monat)) {
-    const fehler = new Error(`"${monat}" ist kein gueltiger Monat (erwartet YYYY-MM).`);
-    (fehler as Error & { statusCode?: number }).statusCode = 400;
-    throw fehler;
+    throw new EingabeFehler(`"${monat}" ist kein gueltiger Monat (erwartet YYYY-MM).`);
   }
   return monat;
+}
+
+function naechsterMonat(monat: string): string {
+  const [jahr, mon] = monat.split('-').map(Number) as [number, number];
+  const d = new Date(Date.UTC(jahr, mon, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
 function brauchtKi(ctx: RoutenKontext): KiDienst {
   if (!ctx.ki) {
     const fehler = new Error(
       'KI-Funktionen sind nicht aktiv. Bitte ANTHROPIC_API_KEY setzen und den Server neu starten.',
-    );
-    (fehler as Error & { statusCode?: number }).statusCode = 503;
+    ) as Error & { statusCode?: number };
+    fehler.statusCode = 503;
     throw fehler;
   }
   return ctx.ki;
@@ -75,6 +80,30 @@ export async function registriereRouten(
     return ctx.monate.synchronisiere(monat);
   });
 
+  /**
+   * Kompakter Zustand ohne sevDesk-Abruf. Beantwortet die Frage "ist der Monat
+   * fertig?" - insbesondere, ob noch Buchungen in sevDesk unzugeordnet sind.
+   */
+  app.get<{ Params: { monat: string } }>('/api/months/:monat/status', async (req) => {
+    const monat = pruefeMonat(req.params.monat);
+    return ctx.monate.status(monat);
+  });
+
+  /** Zustand mehrerer Monate auf einen Blick, z. B. fuer eine Jahresuebersicht. */
+  app.get<{ Querystring: { von?: string; bis?: string } }>(
+    '/api/months',
+    async (req) => {
+      const von = pruefeMonat(req.query.von ?? '');
+      const bis = pruefeMonat(req.query.bis ?? von);
+      const monate: string[] = [];
+
+      for (let m = von; m <= bis && monate.length < 60; m = naechsterMonat(m)) {
+        monate.push(m);
+      }
+      return monate.map((m) => ctx.monate.status(m));
+    },
+  );
+
   app.patch<{
     Params: { monat: string; positionId: string };
     Body: Record<string, unknown>;
@@ -115,7 +144,7 @@ export async function registriereRouten(
     async (req) => {
       const monat = pruefeMonat(req.params.monat);
       const datei = await req.file();
-      if (!datei) throw new Error('Keine Datei im Upload gefunden.');
+      if (!datei) throw new EingabeFehler('Keine Datei im Upload gefunden.');
 
       const bytes = await datei.toBuffer();
       const abgelegt = await ctx.ablage.speichere(
@@ -126,8 +155,11 @@ export async function registriereRouten(
         datei.mimetype,
       );
 
-      const aktuell = ctx.db.ladeMonat(monat);
-      const position = aktuell?.positionen.find((p) => p.id === req.params.positionId);
+      // Bewusst die zusammengefuehrte Sicht: haengt an der Position bereits eine
+      // manuell getroffene Dateiauswahl, muss der neue Beleg dazukommen und die
+      // Auswahl nicht ueberschreiben.
+      const aktuell = await ctx.monate.lade(monat);
+      const position = aktuell.positionen.find((p) => p.id === req.params.positionId);
       const bestehende = position?.dateien ?? [];
 
       ctx.db.speichereOverride(monat, req.params.positionId, {
@@ -147,7 +179,7 @@ export async function registriereRouten(
     async (req) => {
       const monat = pruefeMonat(req.params.monat);
       const datei = await req.file();
-      if (!datei) throw new Error('Keine Datei im Upload gefunden.');
+      if (!datei) throw new EingabeFehler('Keine Datei im Upload gefunden.');
 
       const bytes = await datei.toBuffer();
       const abgelegt = await ctx.ablage.speichere(
@@ -280,7 +312,9 @@ export async function registriereRouten(
       const daten = await ctx.monate.lade(monat);
 
       const position = daten.positionen.find((p) => p.id === req.params.positionId);
-      if (!position) throw new Error(`Position ${req.params.positionId} nicht gefunden.`);
+      if (!position) {
+        throw new NichtGefunden(`Buchung ${req.params.positionId} nicht gefunden.`);
+      }
 
       const bereitsVersucht = position.aktenzeichenKandidaten ?? [];
       const kandidaten = await ki.schlageAktenzeichenVor(

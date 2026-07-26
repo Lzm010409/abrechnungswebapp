@@ -100,7 +100,23 @@ body {
 }
 .banner.fehler { background: #fdecec; color: var(--fehler); }
 .banner.info { background: #e8f2fd; color: var(--akzent); }
+.banner.warnung { background: #fff8e6; color: #8a6100; border-bottom: 1px solid #f0dca8; }
 .banner button { background: none; border: none; cursor: pointer; font-size: 16px; }
+.banner button.inline {
+  font-size: 13px;
+  text-decoration: underline;
+  color: inherit;
+  padding: 0 6px;
+}
+
+.marke {
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  margin-left: 4px;
+  white-space: nowrap;
+}
+.marke.sevdesk-offen { background: #fdf0d5; color: #8a6100; }
 
 /* -- Hauptbereich ----------------------------------------------------- */
 

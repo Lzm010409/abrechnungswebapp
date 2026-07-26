@@ -85,6 +85,26 @@ export interface BelegExtraktion {
   extrahiertAm?: string;
 }
 
+/**
+ * Verbuchungsstand der Bankbuchung in sevDesk selbst.
+ *
+ * Entscheidend fuer die Fehlersuche: eine Buchung ohne Beleg kann zwei ganz
+ * verschiedene Ursachen haben. Ist sie in sevDesk noch gar nicht zugeordnet
+ * ("offen"), gehoert die Korrektur nach sevDesk. Ist sie dort verbucht und
+ * hier trotzdem ohne Datei, liegt es am Belegabruf.
+ */
+export type SevdeskStatus =
+  /** 100 - angelegt, noch keiner Rechnung/keinem Beleg zugeordnet */
+  | 'offen'
+  /** 200 - mit Beleg oder Rechnung verknuepft */
+  | 'verknuepft'
+  /** 300 - als privat markiert */
+  | 'privat'
+  /** 400 - verbucht */
+  | 'verbucht'
+  /** unbekannter Statuscode */
+  | 'unbekannt';
+
 /** Eine Zeile der Monatsansicht: eine Bankbuchung samt allem, was daran haengt. */
 export interface Position {
   /** sevDesk CheckAccountTransaction-ID */
@@ -98,6 +118,8 @@ export interface Position {
   /** Name des Zahlungspflichtigen bzw. -empfaengers, sofern von sevDesk geliefert */
   gegenkonto?: string;
   typ: BuchungsTyp;
+  /** Verbuchungsstand in sevDesk - siehe SevdeskStatus */
+  sevdeskStatus: SevdeskStatus;
 
   /** In sevDesk verknuepfter Beleg (Eingangsrechnung/Kostenbeleg) */
   voucherId?: string;
@@ -114,6 +136,12 @@ export interface Position {
   dateien: BelegDatei[];
   /** Weitere Treffer, die nicht automatisch zugeordnet wurden */
   kandidaten?: BelegDatei[];
+  /**
+   * true, sobald der Nutzer aus mehreren Treffern gewaehlt hat. Die restlichen
+   * Kandidaten bleiben sichtbar, machen die Position aber nicht mehr
+   * mehrdeutig - die Entscheidung ist gefallen.
+   */
+  auswahlBestaetigt?: boolean;
 
   extraktion?: BelegExtraktion;
   status: PositionsStatus;
@@ -132,6 +160,24 @@ export interface MonatsSummen {
   anzahlMehrdeutig: number;
   anzahlOffen: number;
   anzahlIgnoriert: number;
+  /**
+   * Buchungen, die in sevDesk selbst noch keiner Rechnung/keinem Beleg
+   * zugeordnet sind. Solange diese Zahl > 0 ist, ist der Monat noch nicht
+   * abschliessend - die Zuordnung passiert in sevDesk, danach neu laden.
+   */
+  anzahlNichtZugeordnet: number;
+}
+
+/** Kompakter Zustand eines Monats - ohne die vollstaendige Positionsliste. */
+export interface MonatsStatus {
+  monat: string;
+  /** false, wenn der Monat noch nie aus sevDesk geladen wurde */
+  geladen: boolean;
+  synchronisiertAm?: string;
+  summen?: MonatsSummen;
+  /** true, wenn alle Buchungen zugeordnet und belegt sind */
+  abgeschlossen: boolean;
+  anzahlKontoauszuege: number;
 }
 
 export interface Kontoauszug {

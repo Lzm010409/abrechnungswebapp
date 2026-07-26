@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { PDFDocument } from 'pdf-lib';
 import type { BelegDatei, BelegQuelle } from '@abrechnung/shared';
 
 /**
@@ -63,7 +64,7 @@ export class Dateiablage {
       groesse: daten.byteLength,
       mimeType,
       quelle,
-      seiten: mimeType === 'application/pdf' ? zaehleSeiten(daten) : undefined,
+      seiten: mimeType.includes('pdf') ? await zaehleSeiten(daten) : undefined,
     };
   }
 
@@ -90,13 +91,21 @@ export class Dateiablage {
 }
 
 /**
- * Zaehlt Seiten eines PDFs anhand der /Type /Page-Eintraege.
- * Bewusst ohne pdf-lib, weil das hier synchron und guenstig sein soll;
- * fuer die Anzeige reicht die Naeherung. Der exakte Wert entsteht beim
- * Zusammenbau in pdf/build.ts.
+ * Zaehlt die Seiten eines PDFs.
+ *
+ * Ueber pdf-lib statt per Regex auf den Rohbytes: moderne PDFs legen den
+ * Seitenbaum in komprimierten Objektstroemen ab, wo ein Textmuster wie
+ * "/Type /Page" schlicht nicht auftaucht. Die Seitenzahl ist die Grundlage
+ * fuer die Vorschau und die Reihenfolge im Abrechnungs-PDF - sie darf nicht
+ * an der Kompression scheitern.
  */
-function zaehleSeiten(daten: Buffer): number | undefined {
-  const text = daten.subarray(0, Math.min(daten.length, 5_000_000)).toString('latin1');
-  const treffer = text.match(/\/Type\s*\/Page[^s]/g);
-  return treffer ? treffer.length : undefined;
+async function zaehleSeiten(daten: Buffer): Promise<number | undefined> {
+  try {
+    const doc = await PDFDocument.load(daten, { ignoreEncryption: true });
+    return doc.getPageCount();
+  } catch {
+    // Beschaedigtes oder passwortgeschuetztes PDF - die Datei wird trotzdem
+    // abgelegt, nur ohne Seitenangabe.
+    return undefined;
+  }
 }

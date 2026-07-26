@@ -1,0 +1,884 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { FastifyInstance } from 'fastify';
+import { PDFDocument } from 'pdf-lib';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { Monat, MonatsStatus } from '@abrechnung/shared';
+import { baueApp } from './app.js';
+import type { Config } from './config.js';
+import type { Datenbank } from './db/index.js';
+import {
+  starteMockN8n,
+  starteMockSevDesk,
+  testPdf,
+  type MockDaten,
+  type MockN8n,
+  type MockSevDesk,
+} from './testhilfen/mockSevdesk.js';
+import type { CheckAccountTransaction } from './sevdesk/types.js';
+
+/**
+ * Integrationstest der gesamten Kette:
+ *
+ *   HTTP-Route -> MonatsDienst -> sevDesk-Client -> Mock-sevDesk
+ *                              -> RechnungsProvider -> Mock-n8n
+ *                              -> Dateiablage -> SQLite -> PDF
+ *
+ * Es laeuft die echte Anwendung (baueApp), nur die beiden externen Systeme
+ * sind lokale HTTP-Server. Damit wird alles getestet ausser der Frage, ob die
+ * echte sevDesk-API dieselben Formate liefert wie der Mock.
+ */
+
+const MONAT = '2026-06';
+
+function tx(
+  teil: Partial<CheckAccountTransaction> & { id: string; amount: string },
+): CheckAccountTransaction {
+  return {
+    objectName: 'CheckAccountTransaction',
+    valueDate: '2026-06-03T00:00:00+02:00',
+    status: '200',
+    checkAccount: { id: 'konto-1', objectName: 'CheckAccount' },
+    ...teil,
+  };
+}
+
+function basisDaten(): MockDaten {
+  return {
+    checkAccounts: [
+      {
+        id: 'konto-1',
+        objectName: 'CheckAccount',
+        name: 'Geschaeftskonto',
+        type: 'online',
+        status: '100',
+        currency: 'EUR',
+        iban: 'DE89370400440532013000',
+      },
+    ],
+    transaktionen: [],
+    vouchers: [],
+    invoices: [],
+    voucherTransaktionen: {},
+    invoiceTransaktionen: {},
+    voucherDateien: {},
+    invoicePdfs: {},
+  };
+}
+
+describe('End-to-End: gesamte Programmkette', () => {
+  let sevdesk: MockSevDesk;
+  let n8n: MockN8n;
+  let app: FastifyInstance;
+  let db: Datenbank;
+  let dataDir: string;
+
+  const starteApp = async (ueberschreibungen: Partial<Config> = {}) => {
+    const config: Config = {
+      port: 0,
+      logLevel: 'silent',
+      dataDir,
+      sevdesk: { token: 'test-token', baseUrl: sevdesk.url },
+      n8n: { findRechnungUrl: n8n.url },
+      ...ueberschreibungen,
+    };
+    const instanz = await baueApp(config);
+    app = instanz.app;
+    db = instanz.db;
+  };
+
+  beforeEach(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), 'abrechnung-e2e-'));
+    n8n = await starteMockN8n();
+  });
+
+  afterEach(async () => {
+    await app?.close();
+    db?.schliesse();
+    await sevdesk?.schliesse();
+    await n8n?.schliesse();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('Start und Bankkonto', () => {
+    it('ermittelt das aktive Online-Bankkonto automatisch', async () => {
+      sevdesk = await starteMockSevDesk(basisDaten());
+      await starteApp();
+
+      const res = await app.inject({ method: 'GET', url: '/api/capabilities' });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({
+        sevdesk: true,
+        ki: false, // kein ANTHROPIC_API_KEY gesetzt
+        n8nRechnungsabruf: true,
+        checkAccountId: 'konto-1',
+        checkAccountName: 'Geschaeftskonto',
+      });
+    });
+
+    it('ignoriert archivierte und Offline-Konten bei der Auswahl', async () => {
+      const daten = basisDaten();
+      daten.checkAccounts.push(
+        { id: 'alt', objectName: 'CheckAccount', name: 'Altes Konto', type: 'online', status: '0', currency: 'EUR' },
+        { id: 'kasse', objectName: 'CheckAccount', name: 'Kasse', type: 'offline', status: '100', currency: 'EUR' },
+      );
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp();
+
+      expect((await app.inject({ url: '/api/capabilities' })).json()).toMatchObject({
+        checkAccountId: 'konto-1',
+      });
+    });
+
+    it('bricht mit Kandidatenliste ab, wenn die Auswahl nicht eindeutig ist', async () => {
+      const daten = basisDaten();
+      daten.checkAccounts.push({
+        id: 'konto-2', objectName: 'CheckAccount', name: 'Ruecklagen',
+        type: 'online', status: '100', currency: 'EUR', iban: 'DE89370400440532013001',
+      });
+      sevdesk = await starteMockSevDesk(daten);
+
+      await expect(starteApp()).rejects.toThrow(/Mehrere aktive Bankkonten.*konto-1.*konto-2/s);
+      // Damit afterEach nicht ueber undefined stolpert
+      app = { close: async () => undefined } as unknown as FastifyInstance;
+      db = { schliesse: () => undefined } as unknown as Datenbank;
+    });
+
+    it('meldet ein ungueltiges SEVDESK_CHECK_ACCOUNT_ID verstaendlich', async () => {
+      sevdesk = await starteMockSevDesk(basisDaten());
+      await expect(
+        starteApp({
+          sevdesk: { token: 't', baseUrl: sevdesk.url, checkAccountId: 'gibtsnicht' },
+        }),
+      ).rejects.toThrow(/existiert nicht/);
+      app = { close: async () => undefined } as unknown as FastifyInstance;
+      db = { schliesse: () => undefined } as unknown as Datenbank;
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('Monat laden', () => {
+    beforeEach(async () => {
+      const daten = basisDaten();
+
+      // AUSGANG mit Beleg in sevDesk
+      daten.transaktionen.push(
+        tx({
+          id: 'tx-aus', amount: '-119.00',
+          paymtPurpose: 'Telekom Rechnung', payeePayerName: 'Telekom',
+          valueDate: '2026-06-05T00:00:00+02:00',
+        }),
+      );
+      daten.vouchers.push({
+        id: 'v-1', objectName: 'Voucher', status: '1000',
+        supplierName: 'Telekom Deutschland GmbH', sumGross: '119.00',
+      });
+      daten.voucherTransaktionen['v-1'] = ['tx-aus'];
+      daten.voucherDateien['v-1'] = await testPdf(2);
+
+      // EINGANG mit verknuepfter Rechnung
+      daten.transaktionen.push(
+        tx({
+          id: 'tx-ein', amount: '892.50',
+          paymtPurpose: 'Zahlung Gutachten 0626/1811TG01',
+          valueDate: '2026-06-03T00:00:00+02:00',
+        }),
+      );
+      daten.invoices.push({
+        id: 'inv-1', objectName: 'Invoice', status: '1000',
+        invoiceNumber: '0626/1811TG01', sumGross: '892.50',
+      });
+      daten.invoiceTransaktionen['inv-1'] = ['tx-ein'];
+
+      sevdesk = await starteMockSevDesk(daten);
+      n8n.antworten.set('0626/1811TG01', [
+        { file: (await testPdf(1)).toString('base64'), filename: '0626_1811TG01_Rechnung.pdf' },
+      ]);
+      await starteApp();
+    });
+
+    it('baut beide Positionen mit Beleg auf', async () => {
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+
+      expect(monat.positionen).toHaveLength(2);
+
+      const aus = monat.positionen.find((p) => p.id === 'tx-aus')!;
+      expect(aus.typ).toBe('AUSGANG');
+      expect(aus.voucherId).toBe('v-1');
+      expect(aus.dateien).toHaveLength(1);
+      expect(aus.dateien[0]!.quelle).toBe('sevdesk-voucher');
+      expect(aus.status).toBe('ok');
+
+      const ein = monat.positionen.find((p) => p.id === 'tx-ein')!;
+      expect(ein.typ).toBe('EINGANG');
+      expect(ein.aktenzeichen!.normalisiert).toBe('0626/1811TG01');
+      expect(ein.aktenzeichen!.herkunft).toBe('sevdesk-invoice');
+      expect(ein.dateien[0]!.quelle).toBe('onedrive-n8n');
+      expect(ein.status).toBe('ok');
+    });
+
+    it('berechnet die Summen korrekt', async () => {
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      expect(monat.summen).toMatchObject({
+        einnahmen: 892.5,
+        ausgaben: 119,
+        saldo: 773.5,
+        anzahlGesamt: 2,
+        anzahlOk: 2,
+        anzahlOffen: 0,
+        anzahlNichtZugeordnet: 0,
+      });
+    });
+
+    it('sortiert die Positionen nach Datum', async () => {
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      expect(monat.positionen.map((p) => p.id)).toEqual(['tx-ein', 'tx-aus']);
+    });
+
+    it('liefert die Belegdatei ueber die Datei-Route aus', async () => {
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      const dateiId = monat.positionen.find((p) => p.id === 'tx-aus')!.dateien[0]!.id;
+
+      const res = await app.inject({ url: `/api/months/${MONAT}/files/${dateiId}` });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(res.rawPayload.subarray(0, 5).toString()).toBe('%PDF-');
+    });
+
+    it('holt beim zweiten Aufruf aus dem Cache statt erneut aus sevDesk', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      const nachErstem = sevdesk.aufrufe.length;
+
+      await app.inject({ url: `/api/months/${MONAT}` });
+      expect(sevdesk.aufrufe.length).toBe(nachErstem);
+    });
+
+    it('laedt bei ?refresh=true erneut aus sevDesk', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      const nachErstem = sevdesk.aufrufe.length;
+
+      await app.inject({ url: `/api/months/${MONAT}?refresh=true` });
+      expect(sevdesk.aufrufe.length).toBeGreaterThan(nachErstem);
+    });
+
+    it('weist einen ungueltigen Monatsparameter ab', async () => {
+      const res = await app.inject({ url: '/api/months/Juni-2026' });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().fehler).toContain('YYYY-MM');
+    });
+
+    it('filtert Buchungen fremder Konten heraus', async () => {
+      sevdesk.daten.transaktionen.push(
+        tx({
+          id: 'tx-fremd', amount: '500.00',
+          checkAccount: { id: 'konto-2', objectName: 'CheckAccount' },
+        }),
+      );
+      const monat = (
+        await app.inject({ url: `/api/months/${MONAT}?refresh=true` })
+      ).json<Monat>();
+      expect(monat.positionen.map((p) => p.id)).not.toContain('tx-fremd');
+    });
+
+    it('haelt Buchungen ausserhalb des Monats heraus', async () => {
+      sevdesk.daten.transaktionen.push(
+        tx({ id: 'tx-mai', amount: '100.00', valueDate: '2026-05-30T00:00:00+02:00' }),
+        tx({ id: 'tx-juli', amount: '100.00', valueDate: '2026-07-01T00:00:00+02:00' }),
+      );
+      const monat = (
+        await app.inject({ url: `/api/months/${MONAT}?refresh=true` })
+      ).json<Monat>();
+      const ids = monat.positionen.map((p) => p.id);
+      expect(ids).not.toContain('tx-mai');
+      expect(ids).not.toContain('tx-juli');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('Noch nicht zugeordnete Buchungen', () => {
+    beforeEach(async () => {
+      const daten = basisDaten();
+      // status 100 = in sevDesk angelegt, aber noch keiner Rechnung zugeordnet
+      daten.transaktionen.push(
+        tx({
+          id: 'tx-offen', amount: '1240.00', status: '100',
+          paymtPurpose: 'Sammelueberweisung Allianz',
+        }),
+        tx({ id: 'tx-fertig', amount: '-84.20', status: '100', paymtPurpose: 'Amazon' }),
+      );
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp();
+    });
+
+    it('erkennt sie als in sevDesk unzugeordnet und sagt, wo die Korrektur hingehoert', async () => {
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      const p = monat.positionen.find((x) => x.id === 'tx-offen')!;
+
+      expect(p.sevdeskStatus).toBe('offen');
+      expect(p.status).toBe('offen');
+      expect(p.hinweis).toContain('In sevDesk noch nicht zugeordnet');
+    });
+
+    it('zaehlt sie getrennt von "Beleg fehlt"', async () => {
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      expect(monat.summen.anzahlNichtZugeordnet).toBe(2);
+      expect(monat.summen.anzahlOffen).toBe(2);
+    });
+
+    it('meldet den Monat als nicht abgeschlossen', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      const status = (
+        await app.inject({ url: `/api/months/${MONAT}/status` })
+      ).json<MonatsStatus>();
+
+      expect(status.geladen).toBe(true);
+      expect(status.abgeschlossen).toBe(false);
+      expect(status.summen!.anzahlNichtZugeordnet).toBe(2);
+      expect(status.synchronisiertAm).toBeTruthy();
+    });
+
+    it('uebernimmt die Zuordnung, sobald sie in sevDesk nachgetragen wurde', async () => {
+      // Erster Lauf: nichts zugeordnet
+      let monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      expect(monat.summen.anzahlNichtZugeordnet).toBe(2);
+
+      // Der Nutzer verbucht beide Positionen jetzt in sevDesk.
+      sevdesk.daten.transaktionen.forEach((t) => (t.status = '200'));
+      sevdesk.daten.vouchers.push({
+        id: 'v-neu', objectName: 'Voucher', status: '1000', supplierName: 'Amazon',
+      });
+      sevdesk.daten.voucherTransaktionen['v-neu'] = ['tx-fertig'];
+      sevdesk.daten.voucherDateien['v-neu'] = await testPdf(1);
+
+      sevdesk.daten.invoices.push({
+        id: 'inv-neu', objectName: 'Invoice', status: '1000',
+        invoiceNumber: '0626/1900TG01',
+      });
+      sevdesk.daten.invoiceTransaktionen['inv-neu'] = ['tx-offen'];
+      n8n.antworten.set('0626/1900TG01', [
+        { file: (await testPdf(1)).toString('base64'), filename: '0626_1900TG01_Rechnung.pdf' },
+      ]);
+
+      // Zweiter Lauf ueber den Sync-Endpunkt
+      monat = (
+        await app.inject({ method: 'POST', url: `/api/months/${MONAT}/sync` })
+      ).json<Monat>();
+
+      expect(monat.summen.anzahlNichtZugeordnet).toBe(0);
+      expect(monat.summen.anzahlOk).toBe(2);
+      expect(monat.positionen.find((p) => p.id === 'tx-offen')!.aktenzeichen!.normalisiert)
+        .toBe('0626/1900TG01');
+
+      const status = (
+        await app.inject({ url: `/api/months/${MONAT}/status` })
+      ).json<MonatsStatus>();
+      expect(status.abgeschlossen).toBe(true);
+    });
+
+    it('meldet einen nie geladenen Monat als nicht geladen', async () => {
+      const status = (
+        await app.inject({ url: '/api/months/2026-01/status' })
+      ).json<MonatsStatus>();
+      expect(status).toMatchObject({ monat: '2026-01', geladen: false, abgeschlossen: false });
+      expect(status.summen).toBeUndefined();
+    });
+
+    it('liefert eine Uebersicht ueber mehrere Monate', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      const liste = (
+        await app.inject({ url: '/api/months?von=2026-05&bis=2026-07' })
+      ).json<MonatsStatus[]>();
+
+      expect(liste.map((m) => m.monat)).toEqual(['2026-05', '2026-06', '2026-07']);
+      expect(liste.find((m) => m.monat === MONAT)!.geladen).toBe(true);
+      expect(liste.find((m) => m.monat === '2026-05')!.geladen).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('Manuelle Korrekturen', () => {
+    beforeEach(async () => {
+      const daten = basisDaten();
+      daten.transaktionen.push(
+        tx({ id: 'tx-1', amount: '892.50', paymtPurpose: 'Sammelzahlung ohne AZ' }),
+      );
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp();
+      await app.inject({ url: `/api/months/${MONAT}` });
+    });
+
+    const patch = (koerper: unknown) =>
+      app.inject({
+        method: 'PATCH',
+        url: `/api/months/${MONAT}/positions/tx-1`,
+        payload: koerper,
+      });
+
+    it('uebernimmt ein manuell gesetztes Aktenzeichen', async () => {
+      n8n.antworten.set('0626/1811TG01', []);
+      const monat = (await patch({ aktenzeichen: '0626/1811TG01' })).json<Monat>();
+      const p = monat.positionen[0]!;
+
+      expect(p.aktenzeichen!.normalisiert).toBe('0626/1811TG01');
+      expect(p.aktenzeichen!.herkunft).toBe('manuell');
+      expect(p.manuellBestaetigt).toBe(true);
+    });
+
+    it('normalisiert ein manuell eingetipptes Aktenzeichen mit Leerzeichen', async () => {
+      const monat = (await patch({ aktenzeichen: '0626/1811 TG 01' })).json<Monat>();
+      expect(monat.positionen[0]!.aktenzeichen!.normalisiert).toBe('0626/1811TG01');
+    });
+
+    it('weist ein unsinniges Aktenzeichen als Eingabefehler ab, nicht als Serverfehler', async () => {
+      const res = await patch({ aktenzeichen: 'Rechnung 42' });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().fehler).toContain('MMYY/NummerTGXX');
+      expect(res.json().fehler).toContain('0626/1811TG01'); // Beispiel mitliefern
+    });
+
+    it('meldet eine unbekannte Buchung mit 404', async () => {
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/api/months/${MONAT}/positions/gibtsnicht`,
+        payload: { status: 'ignoriert' },
+      });
+      expect(res.statusCode).toBe(404);
+    });
+
+    it('meldet einen noch nicht geladenen Monat mit 404 statt mit 500', async () => {
+      const res = await app.inject({
+        method: 'PATCH',
+        url: '/api/months/2026-01/positions/tx-1',
+        payload: { status: 'ignoriert' },
+      });
+      expect(res.statusCode).toBe(404);
+      expect(res.json().fehler).toContain('noch nicht geladen');
+    });
+
+    it('blendet eine Position aus und nimmt sie aus den Summen', async () => {
+      const monat = (await patch({ status: 'ignoriert' })).json<Monat>();
+      expect(monat.positionen[0]!.status).toBe('ignoriert');
+      expect(monat.summen.einnahmen).toBe(0);
+      expect(monat.summen.anzahlIgnoriert).toBe(1);
+    });
+
+    it('ueberlebt einen erneuten sevDesk-Abruf', async () => {
+      await patch({ aktenzeichen: '0626/1811TG01' });
+
+      const monat = (
+        await app.inject({ method: 'POST', url: `/api/months/${MONAT}/sync` })
+      ).json<Monat>();
+
+      expect(monat.positionen[0]!.aktenzeichen!.normalisiert).toBe('0626/1811TG01');
+      expect(monat.positionen[0]!.manuellBestaetigt).toBe(true);
+    });
+
+    it('stellt beim Zuruecksetzen den sevDesk-Stand wieder her', async () => {
+      // Regression: zuvor wurde die zusammengefuehrte Fassung in den Cache
+      // geschrieben, wodurch der sevDesk-Stand verloren ging und das
+      // Zuruecksetzen wirkungslos blieb.
+      await patch({ aktenzeichen: '0626/1811TG01' });
+      await patch({ status: 'ignoriert' });
+
+      const monat = (
+        await app.inject({
+          method: 'DELETE',
+          url: `/api/months/${MONAT}/positions/tx-1/override`,
+        })
+      ).json<Monat>();
+
+      const p = monat.positionen[0]!;
+      expect(p.aktenzeichen).toBeUndefined();
+      expect(p.status).toBe('offen');
+      expect(p.manuellBestaetigt).toBe(false);
+    });
+
+    it('fuehrt mehrere Korrekturen zusammen, statt sie zu ueberschreiben', async () => {
+      await patch({ aktenzeichen: '0626/1811TG01' });
+      const monat = (await patch({ hinweis: 'telefonisch geklaert' })).json<Monat>();
+
+      expect(monat.positionen[0]!.aktenzeichen!.normalisiert).toBe('0626/1811TG01');
+      expect(monat.positionen[0]!.hinweis).toBe('telefonisch geklaert');
+    });
+
+    it('nimmt einen manuell nachgereichten Beleg entgegen', async () => {
+      const pdf = await testPdf(1);
+      const grenze = '----abrechnungtest';
+      const koerper = Buffer.concat([
+        Buffer.from(
+          `--${grenze}\r\nContent-Disposition: form-data; name="datei"; filename="nachgereicht.pdf"\r\n` +
+            'Content-Type: application/pdf\r\n\r\n',
+        ),
+        pdf,
+        Buffer.from(`\r\n--${grenze}--\r\n`),
+      ]);
+
+      const monat = (
+        await app.inject({
+          method: 'POST',
+          url: `/api/months/${MONAT}/positions/tx-1/upload`,
+          payload: koerper,
+          headers: { 'content-type': `multipart/form-data; boundary=${grenze}` },
+        })
+      ).json<Monat>();
+
+      const p = monat.positionen[0]!;
+      expect(p.dateien).toHaveLength(1);
+      expect(p.dateien[0]!.quelle).toBe('manuell');
+      expect(p.dateien[0]!.dateiname).toBe('nachgereicht.pdf');
+      expect(p.status).toBe('ok');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('Rechnungsabruf ueber n8n', () => {
+    beforeEach(async () => {
+      const daten = basisDaten();
+      daten.transaktionen.push(
+        tx({ id: 'tx-1', amount: '892.50', paymtPurpose: 'RE 0626/1811TG01' }),
+      );
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp();
+    });
+
+    it('arbeitet die Retry-Kette ab und findet die Rechnung im Vormonat', async () => {
+      n8n.antworten.set('0526/1811TG01', [
+        { file: (await testPdf(1)).toString('base64'), filename: '0526_1811TG01_Rechnung.pdf' },
+      ]);
+
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+
+      expect(n8n.angefragt).toEqual(['0626/1811TG01', '0526/1811TG01']);
+      expect(monat.positionen[0]!.dateien).toHaveLength(1);
+      expect(monat.positionen[0]!.status).toBe('ok');
+    });
+
+    it('stellt mehrere Treffer zur Auswahl, statt blind den ersten zu nehmen', async () => {
+      n8n.antworten.set('0626/1811TG01', [
+        { file: (await testPdf(1, 'A')).toString('base64'), filename: 'Rechnung_A.pdf' },
+        { file: (await testPdf(2, 'B')).toString('base64'), filename: 'Rechnung_B.pdf' },
+      ]);
+
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      const p = monat.positionen[0]!;
+
+      expect(p.status).toBe('mehrdeutig');
+      expect(p.dateien).toHaveLength(1);
+      expect(p.kandidaten).toHaveLength(1);
+      expect(p.hinweis).toContain('bitte pruefen');
+    });
+
+    it('laesst den Nutzer aus den Kandidaten waehlen', async () => {
+      n8n.antworten.set('0626/1811TG01', [
+        { file: (await testPdf(1, 'A')).toString('base64'), filename: 'Rechnung_A.pdf' },
+        { file: (await testPdf(2, 'B')).toString('base64'), filename: 'Rechnung_B.pdf' },
+      ]);
+      let monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      const gewuenscht = monat.positionen[0]!.kandidaten![0]!.id;
+
+      monat = (
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/months/${MONAT}/positions/tx-1`,
+          payload: { dateiIds: [gewuenscht] },
+        })
+      ).json<Monat>();
+
+      const p = monat.positionen[0]!;
+      expect(p.dateien.map((d) => d.id)).toEqual([gewuenscht]);
+      expect(p.status).toBe('ok');
+    });
+
+    it('grenzt auf den exakten Rechnungsindex ein, wenn moeglich', async () => {
+      // Der Workflow filtert per startsWith und liefert TG01 und TG02.
+      n8n.antworten.set('0626/1811TG01', [
+        { file: (await testPdf(1, 'TG01')).toString('base64'), filename: '0626_1811TG01_Rechnung.pdf' },
+        { file: (await testPdf(2, 'TG02')).toString('base64'), filename: '0626_1811TG02_Rechnung.pdf' },
+      ]);
+
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      const p = monat.positionen[0]!;
+      expect(p.dateien).toHaveLength(1);
+      expect(p.dateien[0]!.dateiname).toBe('0626_1811TG01_Rechnung.pdf');
+      expect(p.status).toBe('ok');
+    });
+
+    it('meldet einen erfolglosen Abruf mit den geprueften Varianten', async () => {
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      expect(monat.positionen[0]!.status).toBe('offen');
+      expect(monat.positionen[0]!.hinweis).toContain('4 Varianten geprueft');
+    });
+
+    it('faellt auf das sevDesk-PDF zurueck, wenn n8n nichts liefert', async () => {
+      sevdesk.daten.invoices.push({
+        id: 'inv-1', objectName: 'Invoice', status: '1000',
+        invoiceNumber: '0626/1811TG01',
+      });
+      sevdesk.daten.invoiceTransaktionen['inv-1'] = ['tx-1'];
+      sevdesk.daten.invoicePdfs['inv-1'] = await testPdf(1);
+
+      const monat = (
+        await app.inject({ url: `/api/months/${MONAT}?refresh=true` })
+      ).json<Monat>();
+
+      expect(monat.positionen[0]!.dateien[0]!.quelle).toBe('sevdesk-invoice');
+      expect(monat.positionen[0]!.status).toBe('ok');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('Robustheit gegenueber sevDesk-Ausfaellen', () => {
+    beforeEach(async () => {
+      const daten = basisDaten();
+      daten.transaktionen.push(tx({ id: 'tx-1', amount: '-119.00' }));
+      daten.vouchers.push({ id: 'v-1', objectName: 'Voucher', status: '1000' });
+      daten.voucherTransaktionen['v-1'] = ['tx-1'];
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp();
+    });
+
+    it('laeuft weiter, wenn ein Beleg keine Datei angehaengt hat', async () => {
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      expect(monat.positionen[0]!.hinweis).toContain('ohne angehaengte Datei');
+      expect(monat.positionen[0]!.status).toBe('offen');
+    });
+
+    it('faellt auf das Aktenzeichen zurueck, wenn Invoice-Verknuepfungen 404 liefern', async () => {
+      // Genau der als SPIKE markierte Fall: /Invoice/{id}/getCheckAccountTransactions
+      // existiert moeglicherweise nicht.
+      sevdesk.daten.transaktionen.push(
+        tx({ id: 'tx-2', amount: '892.50', paymtPurpose: 'RE 0626/1811TG01' }),
+      );
+      sevdesk.daten.invoices.push({
+        id: 'inv-1', objectName: 'Invoice', status: '1000',
+        invoiceNumber: '0626/1811TG01',
+      });
+      sevdesk.erzwingeStatus.set('/Invoice/inv-1/getCheckAccountTransactions', 404);
+
+      const monat = (
+        await app.inject({ url: `/api/months/${MONAT}?refresh=true` })
+      ).json<Monat>();
+
+      const p = monat.positionen.find((x) => x.id === 'tx-2')!;
+      // Die Rechnung wurde ueber das Aktenzeichen nachgetragen.
+      expect(p.invoiceId).toBe('inv-1');
+      expect(p.aktenzeichen!.normalisiert).toBe('0626/1811TG01');
+    });
+
+    it('meldet einen sevDesk-Ausfall als Fehler, statt stillschweigend leer zu liefern', async () => {
+      sevdesk.erzwingeStatus.set('/CheckAccountTransaction', 500);
+      const res = await app.inject({ url: `/api/months/${MONAT}?refresh=true` });
+      expect(res.statusCode).toBe(500);
+      expect(res.json().fehler).toContain('sevDesk 500');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('Kontoauszuege und Abrechnungs-PDF', () => {
+    beforeEach(async () => {
+      const daten = basisDaten();
+      daten.transaktionen.push(
+        tx({ id: 'tx-aus', amount: '-119.00', valueDate: '2026-06-05T00:00:00+02:00' }),
+        tx({
+          id: 'tx-ein', amount: '892.50',
+          paymtPurpose: 'RE 0626/1811TG01',
+          valueDate: '2026-06-03T00:00:00+02:00',
+        }),
+      );
+      daten.vouchers.push({ id: 'v-1', objectName: 'Voucher', status: '1000' });
+      daten.voucherTransaktionen['v-1'] = ['tx-aus'];
+      daten.voucherDateien['v-1'] = await testPdf(2);
+
+      sevdesk = await starteMockSevDesk(daten);
+      n8n.antworten.set('0626/1811TG01', [
+        { file: (await testPdf(1)).toString('base64'), filename: '0626_1811TG01_Rechnung.pdf' },
+      ]);
+      await starteApp();
+      await app.inject({ url: `/api/months/${MONAT}` });
+    });
+
+    const ladeKontoauszugHoch = async (dateiname: string, seiten: number) => {
+      const pdf = await testPdf(seiten, dateiname);
+      const grenze = '----abrechnungtest';
+      const koerper = Buffer.concat([
+        Buffer.from(
+          `--${grenze}\r\nContent-Disposition: form-data; name="datei"; filename="${dateiname}"\r\n` +
+            'Content-Type: application/pdf\r\n\r\n',
+        ),
+        pdf,
+        Buffer.from(`\r\n--${grenze}--\r\n`),
+      ]);
+      return app.inject({
+        method: 'POST',
+        url: `/api/months/${MONAT}/statements`,
+        payload: koerper,
+        headers: { 'content-type': `multipart/form-data; boundary=${grenze}` },
+      });
+    };
+
+    it('nimmt einen Kontoauszug entgegen und merkt ihn sich', async () => {
+      const monat = (await ladeKontoauszugHoch('Auszug_Juni.pdf', 3)).json<Monat>();
+      expect(monat.kontoauszuege).toHaveLength(1);
+      expect(monat.kontoauszuege[0]!.dateiname).toBe('Auszug_Juni.pdf');
+      expect(monat.kontoauszuege[0]!.seiten).toBe(3);
+    });
+
+    it('behaelt Kontoauszuege ueber einen sevDesk-Neuabruf hinweg', async () => {
+      await ladeKontoauszugHoch('Auszug_Juni.pdf', 2);
+      const monat = (
+        await app.inject({ method: 'POST', url: `/api/months/${MONAT}/sync` })
+      ).json<Monat>();
+      expect(monat.kontoauszuege).toHaveLength(1);
+    });
+
+    it('behaelt die Upload-Reihenfolge mehrerer Auszuege bei', async () => {
+      await ladeKontoauszugHoch('Seite_1.pdf', 1);
+      await ladeKontoauszugHoch('Seite_2.pdf', 1);
+      const monat = (await ladeKontoauszugHoch('Seite_3.pdf', 1)).json<Monat>();
+      expect(monat.kontoauszuege.map((k) => k.dateiname)).toEqual([
+        'Seite_1.pdf', 'Seite_2.pdf', 'Seite_3.pdf',
+      ]);
+    });
+
+    it('entfernt einen Kontoauszug wieder', async () => {
+      let monat = (await ladeKontoauszugHoch('Auszug.pdf', 1)).json<Monat>();
+      const id = monat.kontoauszuege[0]!.id;
+
+      monat = (
+        await app.inject({ method: 'DELETE', url: `/api/months/${MONAT}/statements/${id}` })
+      ).json<Monat>();
+      expect(monat.kontoauszuege).toHaveLength(0);
+    });
+
+    it('erzeugt das vollstaendige Abrechnungs-PDF in der richtigen Reihenfolge', async () => {
+      await ladeKontoauszugHoch('Auszug_Juni.pdf', 3);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/months/${MONAT}/report`,
+        payload: { buero: 'Gollenstede Sachverstand' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(res.headers['content-disposition']).toContain('Abrechnung_2026-06.pdf');
+
+      const doc = await PDFDocument.load(res.rawPayload);
+      // Deckblatt(1) + Kontoauszug(3) + Journal(1) + Voucher(2) + Rechnung(1)
+      expect(doc.getPageCount()).toBe(8);
+    });
+
+    it('erzeugt das PDF auch ohne Kontoauszug', async () => {
+      const res = await app.inject({ method: 'POST', url: `/api/months/${MONAT}/report` });
+      const doc = await PDFDocument.load(res.rawPayload);
+      // Deckblatt + Journal + Voucher(2) + Rechnung(1)
+      expect(doc.getPageCount()).toBe(5);
+    });
+
+    it('laesst ausgeblendete Positionen aus dem PDF heraus', async () => {
+      await app.inject({
+        method: 'PATCH',
+        url: `/api/months/${MONAT}/positions/tx-aus`,
+        payload: { status: 'ignoriert' },
+      });
+
+      const res = await app.inject({ method: 'POST', url: `/api/months/${MONAT}/report` });
+      const doc = await PDFDocument.load(res.rawPayload);
+      // Deckblatt + Journal + nur noch die Rechnung(1)
+      expect(doc.getPageCount()).toBe(3);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('KI-Funktionen ohne API-Key', () => {
+    beforeEach(async () => {
+      sevdesk = await starteMockSevDesk(basisDaten());
+      await starteApp();
+    });
+
+    it('meldet ki:false in den Capabilities', async () => {
+      expect((await app.inject({ url: '/api/capabilities' })).json().ki).toBe(false);
+    });
+
+    it('weist KI-Aufrufe mit 503 und klarer Begruendung ab', async () => {
+      for (const pfad of [
+        `/api/months/${MONAT}/ai/extract`,
+        `/api/months/${MONAT}/ai/match`,
+        `/api/months/${MONAT}/ai/review`,
+      ]) {
+        const res = await app.inject({ method: 'POST', url: pfad });
+        expect(res.statusCode).toBe(503);
+        expect(res.json().fehler).toContain('ANTHROPIC_API_KEY');
+      }
+    });
+
+    it('laesst alle uebrigen Funktionen unberuehrt', async () => {
+      expect((await app.inject({ url: `/api/months/${MONAT}` })).statusCode).toBe(200);
+      expect(
+        (await app.inject({ method: 'POST', url: `/api/months/${MONAT}/report` })).statusCode,
+      ).toBe(200);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('Betrieb ohne n8n', () => {
+    it('nutzt ausschliesslich sevDesk und meldet das in den Capabilities', async () => {
+      const daten = basisDaten();
+      daten.transaktionen.push(
+        tx({ id: 'tx-1', amount: '892.50', paymtPurpose: 'RE 0626/1811TG01' }),
+      );
+      daten.invoices.push({
+        id: 'inv-1', objectName: 'Invoice', status: '1000',
+        invoiceNumber: '0626/1811TG01',
+      });
+      daten.invoiceTransaktionen['inv-1'] = ['tx-1'];
+      daten.invoicePdfs['inv-1'] = await testPdf(1);
+
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp({ n8n: undefined });
+
+      expect((await app.inject({ url: '/api/capabilities' })).json().n8nRechnungsabruf).toBe(false);
+
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      expect(monat.positionen[0]!.dateien[0]!.quelle).toBe('sevdesk-invoice');
+      expect(n8n.angefragt).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('Groessere Datenmengen', () => {
+    it('verarbeitet einen Monat mit 150 Buchungen ueber die Paginierungsgrenze hinweg', async () => {
+      const daten = basisDaten();
+      for (let i = 0; i < 150; i++) {
+        daten.transaktionen.push(
+          tx({
+            id: `tx-${i}`,
+            amount: i % 2 === 0 ? '100.00' : '-50.00',
+            valueDate: `2026-06-${String((i % 28) + 1).padStart(2, '0')}T00:00:00+02:00`,
+          }),
+        );
+      }
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp();
+
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      // sevDesk liefert 100 pro Seite - ohne Paginierung fehlten 50.
+      expect(monat.positionen).toHaveLength(150);
+      expect(monat.summen.anzahlGesamt).toBe(150);
+      expect(monat.summen.einnahmen).toBe(7500);
+      expect(monat.summen.ausgaben).toBe(3750);
+    });
+  });
+});

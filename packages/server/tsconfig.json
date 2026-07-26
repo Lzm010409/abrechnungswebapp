@@ -16,5 +16,8 @@
     "types": ["node"]
   },
   "include": ["src/**/*"],
+  // Testcode und Testhilfen gehoeren nicht in das Produktions-Bundle.
+  // Vitest transpiliert sie selbst und ist davon nicht betroffen.
+  "exclude": ["src/**/*.test.ts", "src/testhilfen/**"],
   "references": [{ "path": "../shared" }]
 }

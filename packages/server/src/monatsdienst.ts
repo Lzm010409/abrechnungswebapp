@@ -2,10 +2,12 @@ import {
   monatsGrenzen,
   type BelegDatei,
   type Monat,
+  type MonatsStatus,
   type Position,
   type PositionsPatch,
 } from '@abrechnung/shared';
 import { parseAktenzeichen } from './aktenzeichen/index.js';
+import { EingabeFehler, NichtGefunden } from './fehler.js';
 import type { Datenbank } from './db/index.js';
 import type { RechnungsProvider } from './invoices/provider.js';
 import type { SevDeskClient } from './sevdesk/client.js';
@@ -164,32 +166,44 @@ export class MonatsDienst {
   }
 
   /**
-   * Legt manuelle Korrekturen ueber die Rohpositionen, setzt Status und Summen
-   * und schreibt das Ergebnis in den Cache.
+   * Legt manuelle Korrekturen ueber die Rohpositionen, setzt Status und Summen.
+   *
+   * Wichtig: im Cache landen die ROHDATEN aus sevDesk, zurueckgegeben wird die
+   * zusammengefuehrte Ansicht. Wuerde die zusammengefuehrte Fassung gespeichert,
+   * waere sie beim naechsten Patch die neue Basis - eine einmal gesetzte
+   * Korrektur liesse sich dann nie wieder zurueecknehmen, weil der sevDesk-Stand
+   * verloren waere.
    */
-  private veredele(monat: string, positionen: Position[], basis?: Monat): Monat {
+  private veredele(monat: string, rohPositionen: Position[], basis?: Monat): Monat {
     const overrides = this.deps.db.ladeOverrides(monat);
 
-    const zusammengefuehrt = positionen
-      .map((p) => {
-        const patch = overrides.get(p.id);
-        return patch ? { ...p, ...patch, manuellBestaetigt: true } : p;
-      })
-      .map(aktualisiereStatus);
-
-    const ergebnis: Monat = {
+    const roh: Monat = {
       monat,
       checkAccountId: this.deps.checkAccount.id,
       checkAccountName: this.deps.checkAccount.name,
-      positionen: zusammengefuehrt,
-      summen: berechneSummen(zusammengefuehrt),
+      positionen: rohPositionen,
+      summen: berechneSummen(rohPositionen),
       verwaisteBelege: basis?.verwaisteBelege ?? [],
       kontoauszuege: this.deps.db.ladeKontoauszuege(monat),
       synchronisiertAm: basis?.synchronisiertAm ?? new Date().toISOString(),
     };
+    this.deps.db.speichereMonat(roh);
 
-    this.deps.db.speichereMonat(ergebnis);
-    return ergebnis;
+    const zusammengefuehrt = rohPositionen.map((p) => {
+      const patch = overrides.get(p.id);
+      if (!patch) return aktualisiereStatus(p);
+      // Nur ein ausdruecklich gesetzter Status haelt die Neuberechnung an.
+      return aktualisiereStatus(
+        { ...p, ...patch, manuellBestaetigt: true },
+        patch.status !== undefined,
+      );
+    });
+
+    return {
+      ...roh,
+      positionen: zusammengefuehrt,
+      summen: berechneSummen(zusammengefuehrt),
+    };
   }
 
   /** Uebernimmt eine manuelle Korrektur an einer Position. */
@@ -199,10 +213,16 @@ export class MonatsDienst {
     patch: PositionsPatch,
   ): Promise<Monat> {
     const aktuell = this.deps.db.ladeMonat(monat);
-    if (!aktuell) throw new Error(`Monat ${monat} ist nicht geladen.`);
+    if (!aktuell) {
+      throw new NichtGefunden(
+        `Monat ${monat} ist noch nicht geladen. Zuerst aus sevDesk laden.`,
+      );
+    }
 
     const position = aktuell.positionen.find((p) => p.id === positionId);
-    if (!position) throw new Error(`Position ${positionId} existiert nicht in ${monat}.`);
+    if (!position) {
+      throw new NichtGefunden(`Buchung ${positionId} existiert nicht in ${monat}.`);
+    }
 
     const teil: Partial<Position> = {};
 
@@ -212,12 +232,15 @@ export class MonatsDienst {
       } else {
         const az = parseAktenzeichen(patch.aktenzeichen, 'manuell');
         if (!az) {
-          throw new Error(
-            `"${patch.aktenzeichen}" entspricht nicht dem Format MMYY/NummerTGXX.`,
+          throw new EingabeFehler(
+            `"${patch.aktenzeichen}" entspricht nicht dem Format MMYY/NummerTGXX ` +
+              '(Beispiel: 0626/1811TG01).',
           );
         }
         teil.aktenzeichen = az;
       }
+      // Ein manuell gesetztes Aktenzeichen beendet die Mehrdeutigkeit.
+      teil.aktenzeichenKandidaten = undefined;
     }
 
     if (patch.status !== undefined) teil.status = patch.status;
@@ -230,17 +253,66 @@ export class MonatsDienst {
       const gewaehlt = alle.filter((d) => patch.dateiIds!.includes(d.id));
       teil.dateien = gewaehlt;
       teil.kandidaten = alle.filter((d) => !patch.dateiIds!.includes(d.id));
+      teil.auswahlBestaetigt = true;
     }
 
     this.deps.db.speichereOverride(monat, positionId, teil);
     return this.veredele(monat, aktuell.positionen);
   }
 
+  /**
+   * Kompakter Zustand eines Monats, ohne ihn aus sevDesk nachzuladen.
+   *
+   * Dient dem Ueberblick, welche Monate noch offen sind - typischerweise weil
+   * Buchungen in sevDesk noch nicht zugeordnet waren, als zuletzt geladen wurde.
+   */
+  status(monat: string): MonatsStatus {
+    const zwischengespeichert = this.deps.db.ladeMonat(monat);
+    const kontoauszuege = this.deps.db.ladeKontoauszuege(monat).length;
+
+    if (!zwischengespeichert) {
+      return {
+        monat,
+        geladen: false,
+        abgeschlossen: false,
+        anzahlKontoauszuege: kontoauszuege,
+      };
+    }
+
+    // Fuer den Status zaehlt die zusammengefuehrte Sicht - eine manuell
+    // geschlossene Position darf den Monat nicht offen halten.
+    const overrides = this.deps.db.ladeOverrides(monat);
+    const zusammengefuehrt = zwischengespeichert.positionen.map((p) => {
+      const patch = overrides.get(p.id);
+      if (!patch) return aktualisiereStatus(p);
+      return aktualisiereStatus(
+        { ...p, ...patch, manuellBestaetigt: true },
+        patch.status !== undefined,
+      );
+    });
+
+    const summen = berechneSummen(zusammengefuehrt);
+
+    return {
+      monat,
+      geladen: true,
+      synchronisiertAm: zwischengespeichert.synchronisiertAm,
+      summen,
+      abgeschlossen:
+        summen.anzahlOffen === 0 &&
+        summen.anzahlMehrdeutig === 0 &&
+        summen.anzahlNichtZugeordnet === 0,
+      anzahlKontoauszuege: kontoauszuege,
+    };
+  }
+
   /** Nimmt eine manuelle Korrektur zurueck und stellt den sevDesk-Stand her. */
   async setzePositionZurueck(monat: string, positionId: string): Promise<Monat> {
     this.deps.db.loescheOverride(monat, positionId);
     const aktuell = this.deps.db.ladeMonat(monat);
-    if (!aktuell) throw new Error(`Monat ${monat} ist nicht geladen.`);
+    if (!aktuell) {
+      throw new NichtGefunden(`Monat ${monat} ist noch nicht geladen.`);
+    }
     return this.veredele(monat, aktuell.positionen);
   }
 }

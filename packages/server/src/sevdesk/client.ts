@@ -181,11 +181,17 @@ export class SevDeskClient {
   /**
    * Buchungen eines Kontos im Zeitraum [von, bis] (jeweils inklusive, ISO-Datum).
    *
+   * Zur Zeitzone: sevDesk liefert valueDate mit Offset, z. B.
+   * "2026-06-01T00:00:00+02:00". In UTC ist das der 31.05. um 22:00 Uhr. Ein
+   * Vergleich ueber Zeitstempel wuerde deshalb Buchungen vom Monatsersten
+   * verlieren und solche vom Ersten des Folgemonats faelschlich aufnehmen.
+   * Massgeblich ist das Datum so, wie sevDesk es anzeigt - also der Datumsteil
+   * des Strings. Genau darauf wird gefiltert.
+   *
    * SPIKE: sevDesk dokumentiert die Datumsfilter fuer diesen Endpunkt nur
-   * unvollstaendig. Wir senden Unix-Sekunden (die in der Praxis uebliche Form).
-   * Sollte der Filter serverseitig ignoriert werden, greift der zusaetzliche
-   * clientseitige Filter unten - das Ergebnis stimmt also in jedem Fall,
-   * schlimmstenfalls holen wir zu viele Datensaetze.
+   * unvollstaendig. Wir senden Unix-Sekunden und weiten das Fenster serverseitig
+   * um zwei Tage, damit keine Randbuchung verlorengeht, egal wie der Server die
+   * Zeitstempel interpretiert. Die exakte Abgrenzung macht der Filter unten.
    */
   async holeTransaktionen(
     checkAccountId: string,
@@ -195,17 +201,14 @@ export class SevDeskClient {
     const roh = await this.holeAlle<CheckAccountTransaction>('/CheckAccountTransaction', {
       'checkAccount[id]': checkAccountId,
       'checkAccount[objectName]': 'CheckAccount',
-      startDate: unixSekunden(von, false),
-      endDate: unixSekunden(bis, true),
+      startDate: unixSekunden(verschiebeTage(von, -2), false),
+      endDate: unixSekunden(verschiebeTage(bis, 2), true),
     });
-
-    const vonMs = Date.parse(`${von}T00:00:00Z`);
-    const bisMs = Date.parse(`${bis}T23:59:59Z`);
 
     return roh.filter((t) => {
       if (t.checkAccount?.id !== checkAccountId) return false;
-      const ms = Date.parse(t.valueDate);
-      return Number.isFinite(ms) && ms >= vonMs && ms <= bisMs;
+      const datum = String(t.valueDate ?? '').slice(0, 10);
+      return datum >= von && datum <= bis;
     });
   }
 
@@ -315,6 +318,12 @@ export class SevDeskClient {
 function unixSekunden(isoDatum: string, endeDesTages: boolean): number {
   const zeit = endeDesTages ? 'T23:59:59Z' : 'T00:00:00Z';
   return Math.floor(Date.parse(`${isoDatum}${zeit}`) / 1000);
+}
+
+function verschiebeTage(isoDatum: string, tage: number): string {
+  const d = new Date(`${isoDatum}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + tage);
+  return d.toISOString().slice(0, 10);
 }
 
 function warte(ms: number): Promise<void> {

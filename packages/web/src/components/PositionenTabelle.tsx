@@ -68,6 +68,14 @@ export function PositionenTabelle({ positionen, ausgewaehlt, onAuswahl }: Props)
                 <span className={`typ ${p.typ.toLowerCase()}`}>
                   {p.typ === 'EINGANG' ? 'EIN' : 'AUS'}
                 </span>
+                {p.sevdeskStatus === 'offen' && (
+                  <span
+                    className="marke sevdesk-offen"
+                    title="In sevDesk noch nicht zugeordnet – dort verbuchen, dann neu laden"
+                  >
+                    sevDesk
+                  </span>
+                )}
               </td>
               <td className="sp-az">
                 {p.aktenzeichen ? (
@@ -91,7 +99,10 @@ export function PositionenTabelle({ positionen, ausgewaehlt, onAuswahl }: Props)
 }
 
 function belegKuerzel(p: Position): string {
-  if (p.dateien.length === 0) return '—';
+  if (p.dateien.length === 0) {
+    // Liegt es an sevDesk, hilft ein Beleg-Upload hier nicht weiter.
+    return p.sevdeskStatus === 'offen' ? 'nicht verbucht' : '—';
+  }
   const kandidaten = p.kandidaten?.length ?? 0;
   if (kandidaten > 0) return `${p.dateien.length} von ${p.dateien.length + kandidaten}`;
   return p.dateien.length > 1 ? `${p.dateien.length} Dateien` : '1 Datei';
