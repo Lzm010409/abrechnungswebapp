@@ -252,6 +252,39 @@ export type LadeEreignis =
   | { art: 'fertig'; monat: Monat }
   | { art: 'fehler'; fehler: string };
 
+/**
+ * Zielordner der Belegablage in OneDrive.
+ *
+ * Die Reihenfolge der Regeln ist Absicht: was auf dem Kontoauszug steht, geht
+ * nach Konto - auch eine mit Karte bezahlte Tankfuellung. "Tanken" meint die
+ * bar bezahlten Tankbelege.
+ */
+export type Ablageordner = 'Konto' | 'Bar' | 'Tanken';
+
+/** Was mit einem einzelnen Beleg bei der Ablage geschehen ist bzw. soll. */
+export interface AblageEintrag {
+  positionId: string;
+  dateiId: string;
+  dateiname: string;
+  ordner: Ablageordner;
+  /** Kurze Begruendung der Einordnung, fuer die Anzeige */
+  begruendung: string;
+  /** Fehlermeldung, wenn die Ablage fehlschlug */
+  fehler?: string;
+}
+
+export interface AblageErgebnis {
+  monat: string;
+  /** false = nur Vorschau, es wurde nichts abgelegt */
+  ausgefuehrt: boolean;
+  /** Ordner-ID des Monats in OneDrive, sofern ermittelt */
+  ordnerId?: string;
+  eintraege: AblageEintrag[];
+  /** Buchungen ohne Beleg - koennen nicht abgelegt werden */
+  ohneBeleg: number;
+  hinweis?: string;
+}
+
 /** Die angemeldete Person, aus dem Entra-ID-Token uebernommen. */
 export interface AngemeldeterBenutzer {
   /** Eindeutige Kennung des Kontos im Tenant */
@@ -271,6 +304,8 @@ export interface Capabilities {
   ki: boolean;
   /** N8N_FIND_RECHNUNG_URL gesetzt */
   n8nRechnungsabruf: boolean;
+  /** N8N_ORDNER_URL und N8N_ABLAGE_URL gesetzt - sonst nur Vorschau */
+  onedriveAblage?: boolean;
   /** SEVDESK_API_TOKEN gesetzt und Bankkonto aufgeloest */
   sevdesk: boolean;
   kiModell?: string;

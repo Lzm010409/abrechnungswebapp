@@ -199,6 +199,7 @@ export async function baueApp(config: Config): Promise<AppInstanz> {
     n8nAktiv: Boolean(config.n8n),
     kiModell: config.anthropic?.modell,
     authDeaktiviert: config.auth.deaktiviert,
+    ablageOptionen: config.ablage,
   });
 
   // Gebautes Frontend ausliefern, sofern vorhanden (Produktion / Docker).

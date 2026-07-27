@@ -1,4 +1,5 @@
 import type {
+  AblageErgebnis,
   Capabilities,
   LadeEreignis,
   Monat,
@@ -150,6 +151,13 @@ export const api = {
     if (!res.ok) throw new ApiFehler('PDF konnte nicht erzeugt werden', res.status);
     return res.blob();
   },
+
+  /** Belege in die OneDrive-Monatsordner einsortieren. */
+  ablage: (monat: string, ausfuehren = false) =>
+    anfrage<AblageErgebnis>(
+      `/api/months/${monat}/ablage${ausfuehren ? '?ausfuehren=true' : ''}`,
+      { method: 'POST' },
+    ),
 
   ki: {
     extrahiere: (monat: string) =>

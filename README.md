@@ -345,7 +345,7 @@ Zweifelsfälle — Beträge, Verknüpfungen und Summen kommen aus sevDesk.
 npm test
 ```
 
-269 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+279 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 
@@ -408,30 +408,37 @@ ohne weitere Einstellung.
 
 ### Belege nach OneDrive einsortieren
 
-Nach Abschluss der Zuordnung sollen die Belege in die Monatsordner wandern:
+Beim Erzeugen des Abrechnungs-PDF werden die Belege den Monatsordnern
+zugeteilt:
 
 | Ordner | Inhalt |
 |---|---|
-| `Konto` | alles, was einer Kontoauszugsseite zugeordnet werden konnte |
-| `Tanken` | Tankbelege |
+| `Konto` | alles, was sich einer Kontoauszugsseite zuordnen ließ |
+| `Tanken` | von den übrigen die Tankbelege |
 | `Bar` | der Rest |
 
-Die Einteilung steht bereits: `packages/server/src/onedrive/kategorie.ts`.
-Konto/Bar ergibt sich aus derselben Seitenzuordnung, die auch die Reihenfolge
-im Abrechnungs-PDF bestimmt; Tankbelege werden über Marke, Verwendungszweck,
-Dateiname und — sofern die KI aktiv ist — den ausgelesenen Aussteller erkannt.
-
-Die Reihenfolge der Regeln ist dabei nicht beliebig: eine mit Karte bezahlte
+Die Reihenfolge der Regeln ist nicht beliebig: eine mit Karte bezahlte
 Tankfüllung steht auf dem Kontoauszug und gehört nach `Konto`. `Tanken` meint
 die bar bezahlten Tankbelege.
 
-Die Ordner-ID des Monats liefert der n8n-Workflow **Find Ausgabenordner für
-Jahr und Monat** (`FfLNDgPrXdV6lJe3`). Was noch fehlt:
+Warum erst am Schluss: die Einteilung hängt daran, welche Buchung sich auf
+einer Auszugsseite wiederfindet — dieselbe Zuordnung, die auch die Reihenfolge
+im PDF bestimmt. Vorher steht sie schlicht nicht fest.
 
-* der Aufrufvertrag des Workflows (Feldnamen der Eingabe, Form der Antwort) —
-  für MCP ist er nicht freigegeben, also nicht auslesbar
-* ein zweiter Workflow, der eine Datei in einen Ordner **legt** — der
-  vorhandene liefert nur die ID
+**Verschoben wird nichts von allein.** Nach dem PDF erscheint eine Vorschau mit
+der Einteilung; erst ein Klick legt die Dateien ab. Ohne die beiden Webhooks
+bleibt es bei der Vorschau — die ist auch ohne OneDrive nützlich.
+
+```
+POST /api/months/2026-06/ablage                 → Vorschau
+POST /api/months/2026-06/ablage?ausfuehren=true → legt ab
+```
+
+Was noch fehlt: `N8N_ABLAGE_URL`, also ein Workflow, der eine Datei in einen
+Unterordner legt. Er bekommt `{ ordnerId, unterordner, dateiname, inhalt }`,
+wobei `inhalt` base64 ist. Die Ordner-ID liefert der vorhandene Workflow
+**Find Ausgabenordner für Jahr und Monat** (`FfLNDgPrXdV6lJe3`), aufgerufen mit
+`{ jahr: "26", monat: "06" }`.
 
 ---
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
+  AblageErgebnis,
   Capabilities,
   LadeFortschritt,
   LadePhase,
@@ -14,6 +15,7 @@ import {
   monatsTitel,
   verschiebeMonat,
 } from './api/client';
+import { Ablagevorschau } from './components/Ablagevorschau';
 import { Anmeldung } from './components/Anmeldung';
 import { Detailbereich } from './components/Detailbereich';
 import { Kontoauszuege } from './components/Kontoauszuege';
@@ -28,6 +30,7 @@ export function App() {
   const [review, setReview] = useState<MonatsReview>();
   const [laedt, setLaedt] = useState(false);
   const [phasen, setPhasen] = useState<Map<LadePhase, LadeFortschritt>>(new Map());
+  const [ablage, setAblage] = useState<AblageErgebnis>();
   const [meldung, setMeldung] = useState<string>();
   const [fehler, setFehler] = useState<string>();
   /** Bricht einen noch laufenden Lade-Stream ab, wenn der Monat wechselt. */
@@ -95,6 +98,7 @@ export function App() {
   useEffect(() => {
     setAusgewaehlt(undefined);
     setReview(undefined);
+    setAblage(undefined);
     setDaten(null);
     void laden();
     return () => abbruch.current?.abort();
@@ -223,6 +227,22 @@ export function App() {
             />
           )}
 
+          {ablage && (
+            <Ablagevorschau
+              ergebnis={ablage}
+              laedt={laedt}
+              onSchliessen={() => setAblage(undefined)}
+              onAusfuehren={
+                faehigkeiten?.onedriveAblage
+                  ? () =>
+                      mitLadeanzeige(async () => {
+                        setAblage(await api.ablage(monat, true));
+                      })
+                  : undefined
+              }
+            />
+          )}
+
           {review && (
             <section className="review">
               <h4>KI-Prüfung</h4>
@@ -319,6 +339,10 @@ export function App() {
               a.download = `Abrechnung_${monat}.pdf`;
               a.click();
               URL.revokeObjectURL(url);
+
+              // Die Einteilung steht erst jetzt fest - sie haengt daran, welche
+              // Buchung sich auf einer Kontoauszugsseite wiederfindet.
+              setAblage(await api.ablage(monat));
             })
           }
         >

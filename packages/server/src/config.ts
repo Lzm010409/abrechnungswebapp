@@ -38,6 +38,16 @@ export interface Config {
     authValue?: string;
   };
 
+  /** Ablage der Belege in den OneDrive-Monatsordnern. */
+  ablage?: {
+    /** Webhook: Jahr + Monat -> Ordner-ID des Ausgabenordners */
+    ordnerUrl?: string;
+    /** Webhook: legt eine Datei in einen Unterordner */
+    ablageUrl?: string;
+    authHeader?: string;
+    authValue?: string;
+  };
+
   anthropic?: {
     apiKey: string;
     modell: string;
@@ -161,6 +171,8 @@ export function ladeConfig(): Config {
   // nur die KI-Funktionen melden sich ueber /api/capabilities als inaktiv.
   const anthropicKey = env('ANTHROPIC_API_KEY');
   const n8nUrl = env('N8N_FIND_RECHNUNG_URL');
+  const ordnerUrl = env('N8N_ORDNER_URL');
+  const ablageUrl = env('N8N_ABLAGE_URL');
 
   return {
     port: Number(env('PORT') ?? 3000),
@@ -180,6 +192,16 @@ export function ladeConfig(): Config {
           authValue: env('N8N_WEBHOOK_AUTH_VALUE'),
         }
       : undefined,
+
+    ablage:
+      ordnerUrl || ablageUrl
+        ? {
+            ordnerUrl,
+            ablageUrl,
+            authHeader: env('N8N_WEBHOOK_AUTH_HEADER'),
+            authValue: env('N8N_WEBHOOK_AUTH_VALUE'),
+          }
+        : undefined,
 
     anthropic: anthropicKey
       ? {

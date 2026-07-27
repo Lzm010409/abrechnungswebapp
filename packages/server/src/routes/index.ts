@@ -12,6 +12,7 @@ import type { MonatsDienst } from '../monatsdienst.js';
 import { baueAbrechnungsPdf } from '../pdf/build.js';
 import type { CheckAccount } from '../sevdesk/types.js';
 import { EingabeFehler, NichtGefunden } from '../fehler.js';
+import { OneDriveAblage, type AblageOptionen } from '../onedrive/ablage.js';
 import type { Dateiablage } from '../storage/dateien.js';
 
 export interface RoutenKontext {
@@ -23,6 +24,8 @@ export interface RoutenKontext {
   n8nAktiv: boolean;
   kiModell?: string;
   authDeaktiviert: boolean;
+  /** Webhooks fuer die Ablage in OneDrive - ohne sie gibt es nur Vorschau. */
+  ablageOptionen?: AblageOptionen;
 }
 
 /** Wirft einen 400er, wenn der Monatsparameter nicht YYYY-MM ist. */
@@ -78,6 +81,7 @@ export async function registriereRouten(
     ki: Boolean(ctx.ki),
     kiModell: ctx.ki ? ctx.kiModell : undefined,
     n8nRechnungsabruf: ctx.n8nAktiv,
+    onedriveAblage: Boolean(ctx.ablageOptionen?.ordnerUrl && ctx.ablageOptionen?.ablageUrl),
     sevdesk: true,
     checkAccountId: ctx.checkAccount.id,
     checkAccountName: ctx.checkAccount.name,
@@ -331,6 +335,31 @@ export async function registriereRouten(
         .header('Content-Type', 'application/pdf')
         .header('Content-Disposition', `attachment; filename="Abrechnung_${monat}.pdf"`)
         .send(pdf);
+    },
+  );
+
+  /**
+   * Legt die Belege in den OneDrive-Monatsordnern ab.
+   *
+   * Bewusst erst am Ende, zusammen mit dem Abrechnungs-PDF: die Einteilung
+   * haengt davon ab, welche Buchung sich auf einer Kontoauszugsseite
+   * wiederfindet - und das steht erst fest, wenn der Auszug hochgeladen ist.
+   *
+   * Ohne `?ausfuehren=true` entsteht nur eine Vorschau. Dateien in fremde
+   * Ordner zu schieben ist nichts, was nebenbei passieren sollte.
+   */
+  app.post<{ Params: { monat: string }; Querystring: { ausfuehren?: string } }>(
+    '/api/months/:monat/ablage',
+    async (req) => {
+      const monat = pruefeMonat(req.params.monat);
+      const daten = await ctx.monate.lade(monat);
+
+      const ablage = new OneDriveAblage(ctx.ablageOptionen ?? {}, {
+        ladeDatei: (dateiId) => ctx.ablage.lese(monat, dateiId),
+        log: app.log,
+      });
+
+      return ablage.lege(daten, req.query.ausfuehren !== 'true');
     },
   );
 
