@@ -249,8 +249,15 @@ nach einer OneDrive-Kennung aussieht (`ordnerId`, `folderId`, `id`, `itemId`,
 
 ```
 POST [ { "jahr": "2026", "monat": "07" } ]
-→    [ { "id": "01ABCDEF…" } ]
+→    [ { "id": "017CTANMEXRS4RMU2ZWRB32HLMDMEXZM5B" } ]
 ```
+
+> **Der Webhook muss auf das Ergebnis warten.** Steht im Webhook-Knoten
+> *Respond* auf `Immediately`, antwortet n8n mit
+> `{"message":"Workflow was started"}` und schickt die Ordner-ID nie —
+> die Ablage meldet dann „kein Ausgabenordner gefunden". Richtig ist
+> `Using Respond to Webhook node` oder `Last node`. Die Fehlermeldung in der
+> Oberfläche weist ausdrücklich darauf hin, wenn genau das passiert.
 
 Die Ablage bekommt je Datei einen Aufruf, `inhalt` ist base64:
 

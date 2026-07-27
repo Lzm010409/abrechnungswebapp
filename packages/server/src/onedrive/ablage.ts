@@ -160,7 +160,8 @@ export class OneDriveAblage {
         hinweis:
           `Zu ${monat.monat} wurde in OneDrive kein Ausgabenordner gefunden. ` +
           `Der Workflow bekam [{ jahr: "${jahr}", monat: "${mon}" }] und antwortete ` +
-          `mit: ${gefunden.antwort}`,
+          `mit: ${gefunden.antwort}` +
+          deuteAntwort(gefunden.antwort),
       };
     }
 
@@ -387,6 +388,30 @@ export class OneDriveAblage {
     await this.schlaf(ms);
     return true;
   }
+}
+
+/**
+ * Deutet die haeufigen Antworten, statt den Nutzer raten zu lassen.
+ *
+ * Erwartet wird `[{ "id": "017CTAN…" }]` - eine Liste mit der Ordnerkennung.
+ * Wer stattdessen "Workflow was started" zurueckbekommt, hat im Webhook-Knoten
+ * "Respond: Immediately" stehen: n8n bestaetigt dann nur den Start und schickt
+ * das Ergebnis nie. Das ist die mit Abstand haeufigste Ursache und von einem
+ * echten "nichts gefunden" nicht zu unterscheiden, solange man die Antwort
+ * nicht sieht.
+ */
+function deuteAntwort(antwort: string): string {
+  if (antwort.includes('Workflow was started')) {
+    return (
+      ' — der Webhook antwortet sofort, statt auf das Ergebnis zu warten. ' +
+      'In n8n im Webhook-Knoten "Respond" auf "Using Respond to Webhook node" ' +
+      'oder "Last node" stellen.'
+    );
+  }
+  if (antwort === '(leer)' || antwort === '[]' || antwort === '{}') {
+    return ' — der Workflow lief, fand zu diesem Monat aber keinen Ordner.';
+  }
+  return '';
 }
 
 /** Antwort fuer die Fehlermeldung - kurz genug fuer eine Zeile Oberflaeche. */

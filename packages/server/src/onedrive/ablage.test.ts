@@ -247,6 +247,32 @@ describe('Ablegen ueber n8n', () => {
       headers: { get: (name: string) => (name === 'retry-after' ? (retryAfter ?? null) : null) },
     }) as unknown as Response;
 
+  it('kommt mit der echten Antwort des Ordner-Workflows durch', async () => {
+    // Ende zu Ende mit dem tatsaechlichen Rueckgabekoerper - der Test oben
+    // prueft nur die Suchfunktion, dieser den ganzen Weg bis zur Ablage.
+    const aufrufe: Array<{ url: string; body: unknown }> = [];
+    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
+      aufrufe.push({ url: String(url), body: JSON.parse(String(init.body)) });
+      return antwort(
+        String(url).endsWith('/ordner')
+          ? [{ id: '017CTANMEXRS4RMU2ZWRB32HLMDMEXZM5B' }]
+          : { ok: true },
+      );
+    });
+
+    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, { pauseMs: 0 }).lege(
+      monat({ positionen: [pos({ id: 'a' })] }),
+      false,
+    );
+
+    expect(ergebnis.ausgefuehrt).toBe(true);
+    expect(ergebnis.ordnerId).toBe('017CTANMEXRS4RMU2ZWRB32HLMDMEXZM5B');
+    expect(ergebnis.hinweis).toBeUndefined();
+    expect(aufrufe[1]!.body).toMatchObject({
+      ordnerId: '017CTANMEXRS4RMU2ZWRB32HLMDMEXZM5B',
+    });
+  });
+
   it('holt die Ordner-ID und legt jede Datei ab', async () => {
     const aufrufe: Array<{ url: string; body: unknown }> = [];
     const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
@@ -379,6 +405,31 @@ describe('Ablegen ueber n8n', () => {
     expect(ergebnis.hinweis).toContain('{"objects":[]}');
   });
 
+  it('erkennt einen Webhook, der nur den Start bestaetigt', async () => {
+    // Die haeufigste Fehlkonfiguration: "Respond: Immediately". n8n schickt
+    // dann nie das Ergebnis - von "nichts gefunden" nicht zu unterscheiden.
+    const fetchImpl = vi.fn(async () => antwort({ message: 'Workflow was started' }));
+
+    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch).lege(
+      monat({ positionen: [pos({ id: 'a' })] }),
+      false,
+    );
+
+    expect(ergebnis.hinweis).toContain('antwortet sofort');
+    expect(ergebnis.hinweis).toContain('Respond to Webhook');
+  });
+
+  it('unterscheidet ein leeres Ergebnis von einer kaputten Antwort', async () => {
+    const fetchImpl = vi.fn(async () => antwort([]));
+
+    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch).lege(
+      monat({ positionen: [pos({ id: 'a' })] }),
+      false,
+    );
+
+    expect(ergebnis.hinweis).toContain('keinen Ordner');
+  });
+
   it('meldet, welche Datei gerade drankommt', async () => {
     const fetchImpl = vi.fn(async (url: string) =>
       antwort(String(url).endsWith('/ordner') ? { ordnerId: 'X' } : { ok: true }),
@@ -425,6 +476,14 @@ describe('sucheOrdnerId', () => {
     expect(sucheOrdnerId({ folderId: '01ABCDEF' })).toBe('01ABCDEF');
     expect(sucheOrdnerId([{ id: '01ABCDEF' }])).toBe('01ABCDEF');
     expect(sucheOrdnerId({ objects: { item: { driveItemId: '01ABCDEF' } } })).toBe('01ABCDEF');
+  });
+
+  it('liest die Antwort des Workflows so, wie sie tatsaechlich kommt', () => {
+    // Wortwoertlich der Rueckgabekoerper von "Find Ausgabenordner":
+    // eine Liste mit einem Objekt, die Kennung unter "id".
+    expect(sucheOrdnerId([{ id: '017CTANMEXRS4RMU2ZWRB32HLMDMEXZM5B' }])).toBe(
+      '017CTANMEXRS4RMU2ZWRB32HLMDMEXZM5B',
+    );
   });
 
   it('nimmt keine Wortgruppe fuer eine Kennung', () => {
