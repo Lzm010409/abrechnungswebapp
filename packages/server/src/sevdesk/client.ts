@@ -270,48 +270,161 @@ export class SevDeskClient {
   // Dateien
   // -------------------------------------------------------------------------
 
-  /** Belegdatei eines Vouchers als Buffer, oder null wenn keine angehaengt ist. */
-  async holeVoucherDatei(
-    voucherId: string,
-  ): Promise<{ daten: Buffer; dateiname: string; mimeType: string } | null> {
-    try {
-      const antwort = await this.request<SevDeskAntwort<DokumentBild>>(
-        `/Voucher/${voucherId}/getDocumentImage`,
-      );
-      const obj = antwort.objects;
-      if (!obj?.content) return null;
-      return {
-        daten: Buffer.from(obj.content, 'base64'),
-        dateiname: obj.filename ?? `beleg-${voucherId}.pdf`,
-        mimeType: obj.mimeType ?? 'application/pdf',
-      };
-    } catch (err) {
-      if (err instanceof SevDeskFehler && err.status === 404) return null;
-      throw err;
+  /**
+   * Laedt eine Datei von sevDesk.
+   *
+   * sevDesk antwortet auf den Datei-Endpunkten uneinheitlich: mal mit einer
+   * JSON-Huelle, die den Inhalt base64-kodiert traegt, mal mit dem rohen
+   * Dateistrom. Beobachtet wurde beides. Diese Methode entscheidet anhand des
+   * tatsaechlichen Content-Type statt anhand einer Annahme - der frueher
+   * bedingungslose Aufruf von res.json() ist an einem "%PDF-1.4" zerbrochen
+   * und hat den kompletten Belegabruf scheitern lassen.
+   */
+  private async holeDatei(
+    pfad: string,
+    query: Record<string, string | number | undefined>,
+    standardName: string,
+  ): Promise<Datei | null> {
+    const url = new URL(`${this.baseUrl}${pfad}`);
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined) url.searchParams.set(k, String(v));
     }
+
+    let letzterFehler: unknown;
+    for (let versuch = 0; versuch <= this.maxRetries; versuch++) {
+      try {
+        const res = await this.doFetch(url, {
+          headers: {
+            Authorization: this.token,
+            // Beide Formate ausdruecklich akzeptieren.
+            Accept: 'application/json, application/pdf, application/octet-stream, */*',
+          },
+        });
+
+        if (res.status === 404) return null;
+
+        if ((res.status === 429 || res.status >= 500) && versuch < this.maxRetries) {
+          await warte(2 ** versuch * 500);
+          continue;
+        }
+
+        if (!res.ok) {
+          const body = await res.text().catch(() => '');
+          throw new SevDeskFehler(
+            `sevDesk ${res.status} bei ${pfad}`,
+            res.status,
+            pfad,
+            body.slice(0, 500),
+          );
+        }
+
+        const contentType = res.headers.get('content-type') ?? '';
+        const rohdaten = Buffer.from(await res.arrayBuffer());
+
+        // Fall 1: JSON-Huelle mit base64-Inhalt.
+        if (contentType.includes('json')) {
+          return this.leseJsonDatei(rohdaten, standardName);
+        }
+
+        // Fall 2: roher Dateistrom.
+        if (rohdaten.byteLength === 0) return null;
+        return {
+          daten: rohdaten,
+          dateiname: dateinameAusHeader(res.headers.get('content-disposition')) ?? standardName,
+          mimeType: contentType.split(';')[0]?.trim() || erkenneMimeType(rohdaten),
+        };
+      } catch (err) {
+        letzterFehler = err;
+        if (err instanceof SevDeskFehler) throw err;
+        if (versuch < this.maxRetries) {
+          await warte(2 ** versuch * 500);
+          continue;
+        }
+      }
+    }
+
+    throw letzterFehler instanceof Error
+      ? letzterFehler
+      : new Error(`Dateiabruf ${pfad} fehlgeschlagen`);
+  }
+
+  /**
+   * Wertet die JSON-Variante aus. sevDesk legt den Inhalt je nach Endpunkt
+   * unter objects.content ab oder gibt objects direkt als Base64-String zurueck.
+   */
+  private leseJsonDatei(rohdaten: Buffer, standardName: string): Datei | null {
+    let geparst: SevDeskAntwort<DokumentBild | RechnungsPdf | string | null>;
+    try {
+      geparst = JSON.parse(rohdaten.toString('utf8'));
+    } catch {
+      // Als JSON angekuendigt, war aber keines - dann eben als Datei behandeln.
+      return {
+        daten: rohdaten,
+        dateiname: standardName,
+        mimeType: erkenneMimeType(rohdaten),
+      };
+    }
+
+    const obj = geparst.objects;
+    if (!obj) return null;
+
+    if (typeof obj === 'string') {
+      return {
+        daten: Buffer.from(obj, 'base64'),
+        dateiname: standardName,
+        mimeType: 'application/pdf',
+      };
+    }
+
+    if (!obj.content) return null;
+    return {
+      daten: Buffer.from(obj.content, 'base64'),
+      dateiname: obj.filename ?? standardName,
+      mimeType: obj.mimeType ?? 'application/pdf',
+    };
+  }
+
+  /** Belegdatei eines Vouchers, oder null wenn keine angehaengt ist. */
+  async holeVoucherDatei(voucherId: string): Promise<Datei | null> {
+    return this.holeDatei(
+      `/Voucher/${voucherId}/getDocumentImage`,
+      {},
+      `beleg-${voucherId}.pdf`,
+    );
   }
 
   /** Ausgangsrechnung als PDF - Fallback, wenn n8n/OneDrive nichts liefert. */
-  async holeRechnungsPdf(
-    invoiceId: string,
-  ): Promise<{ daten: Buffer; dateiname: string; mimeType: string } | null> {
-    try {
-      const antwort = await this.request<SevDeskAntwort<RechnungsPdf>>(
-        `/Invoice/${invoiceId}/getPdf`,
-        { download: 'false' },
-      );
-      const obj = antwort.objects;
-      if (!obj?.content) return null;
-      return {
-        daten: Buffer.from(obj.content, 'base64'),
-        dateiname: obj.filename ?? `rechnung-${invoiceId}.pdf`,
-        mimeType: obj.mimeType ?? 'application/pdf',
-      };
-    } catch (err) {
-      if (err instanceof SevDeskFehler && err.status === 404) return null;
-      throw err;
-    }
+  async holeRechnungsPdf(invoiceId: string): Promise<Datei | null> {
+    return this.holeDatei(
+      `/Invoice/${invoiceId}/getPdf`,
+      { download: 'false' },
+      `rechnung-${invoiceId}.pdf`,
+    );
   }
+}
+
+export interface Datei {
+  daten: Buffer;
+  dateiname: string;
+  mimeType: string;
+}
+
+/** Dateinamen aus einem Content-Disposition-Header ziehen. */
+function dateinameAusHeader(header: string | null): string | undefined {
+  if (!header) return undefined;
+  const stern = header.match(/filename\*=(?:UTF-8'')?"?([^";]+)"?/i);
+  if (stern?.[1]) return decodeURIComponent(stern[1]);
+  const einfach = header.match(/filename="?([^";]+)"?/i);
+  return einfach?.[1];
+}
+
+/** Notbehelf, wenn der Server keinen brauchbaren Content-Type mitschickt. */
+function erkenneMimeType(daten: Buffer): string {
+  const kopf = daten.subarray(0, 5).toString('latin1');
+  if (kopf.startsWith('%PDF-')) return 'application/pdf';
+  if (daten[0] === 0xff && daten[1] === 0xd8) return 'image/jpeg';
+  if (kopf.startsWith('\x89PNG')) return 'image/png';
+  return 'application/octet-stream';
 }
 
 /** ISO-Datum -> Unix-Sekunden. `endeDesTages` schiebt auf 23:59:59. */

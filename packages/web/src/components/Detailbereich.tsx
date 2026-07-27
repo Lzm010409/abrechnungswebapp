@@ -2,6 +2,18 @@ import { useRef, useState } from 'react';
 import type { Capabilities, Position } from '@abrechnung/shared';
 import { api, deutschesDatum, euro } from '../api/client';
 
+/**
+ * Ein Beleg gilt nur dann als Bild, wenn Typ oder Endung das eindeutig sagen.
+ * Im Zweifel wird der PDF-Rahmen genommen - der zeigt bei einem unerwarteten
+ * Format immerhin den Download an, waehrend ein <img> nur ein kaputtes
+ * Bildsymbol liefert.
+ */
+function istBild(datei: { mimeType: string; dateiname: string }): boolean {
+  if (datei.mimeType.startsWith('image/')) return true;
+  if (datei.mimeType.includes('pdf')) return false;
+  return /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i.test(datei.dateiname);
+}
+
 interface Props {
   monat: string;
   position?: Position;
@@ -67,22 +79,37 @@ export function Detailbereich({
 
       {position.hinweis && <div className="hinweis">{position.hinweis}</div>}
 
-      {/* -- Belegvorschau -- */}
+      {/* -- Belegvorschau --
+          Nur wenn der Typ eindeutig ein Bild ist, wird <img> verwendet.
+          Alles andere - auch ein unbekannter Typ - geht in den PDF-Rahmen:
+          Belege sind hier praktisch immer PDFs, und ein <img> auf ein PDF
+          zeigt nur ein kaputtes Bildsymbol. */}
       <div className="vorschau">
         {aktiveDatei ? (
-          aktiveDatei.mimeType.includes('pdf') ? (
+          istBild(aktiveDatei) ? (
+            <img src={api.dateiUrl(monat, aktiveDatei.id)} alt={aktiveDatei.dateiname} />
+          ) : (
             <iframe
               title={aktiveDatei.dateiname}
               src={api.dateiUrl(monat, aktiveDatei.id)}
               className="pdf"
             />
-          ) : (
-            <img src={api.dateiUrl(monat, aktiveDatei.id)} alt={aktiveDatei.dateiname} />
           )
         ) : (
           <div className="kein-beleg">Kein Beleg hinterlegt</div>
         )}
       </div>
+
+      {aktiveDatei && (
+        <p className="klein grau dateizeile">
+          {aktiveDatei.dateiname}
+          {aktiveDatei.seiten ? ` · ${aktiveDatei.seiten} Seite${aktiveDatei.seiten === 1 ? '' : 'n'}` : ''}
+          {' · '}
+          <a href={api.dateiUrl(monat, aktiveDatei.id)} target="_blank" rel="noreferrer">
+            in neuem Tab öffnen
+          </a>
+        </p>
+      )}
 
       {/* -- Kandidatenauswahl bei mehreren Treffern -- */}
       {(position.kandidaten?.length ?? 0) > 0 && (

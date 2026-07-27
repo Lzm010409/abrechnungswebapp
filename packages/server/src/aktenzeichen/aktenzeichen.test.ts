@@ -5,6 +5,7 @@ import {
   erzeugeVarianten,
   extrahiereAusVerwendungszweck,
   parseAktenzeichen,
+  workflowEingabe,
 } from './index.js';
 
 describe('parseAktenzeichen', () => {
@@ -107,14 +108,20 @@ describe('extrahiereAusVerwendungszweck', () => {
 });
 
 describe('erzeugeVarianten', () => {
-  it('liefert die Retry-Kette in der dokumentierten Reihenfolge', () => {
+  it('variiert nur den Monat - der Index ist fuer die Suche belanglos', () => {
+    // Der Workflow verwirft den Index und sucht ueber das Aktenzeichen.
+    // Ueber TG01/TG02 zu iterieren waere derselbe Aufruf zweimal.
     const az = parseAktenzeichen('0126/1800TG01')!;
     expect(erzeugeVarianten(az)).toEqual([
       '0126/1800TG01', // wie erkannt
       '1225/1800TG01', // Vormonat - Buchung bis 30 Tage nach Rechnung
-      '0126/1800TG02', // anderer Rechnungsindex
-      '1225/1800TG02', // beides kombiniert
     ]);
+  });
+
+  it('haengt bei unbekanntem Index "01" an, damit die Workflow-Regex greift', () => {
+    const az = parseAktenzeichen('0126/1800TG')!;
+    expect(az.rechnungsindex).toBeUndefined();
+    expect(erzeugeVarianten(az)).toEqual(['0126/1800TG01', '1225/1800TG01']);
   });
 
   it('rechnet den Jahreswechsel korrekt zurueck', () => {
@@ -129,6 +136,62 @@ describe('erzeugeVarianten', () => {
   });
 });
 
+describe('Aktenzeichen ohne Rechnungsindex', () => {
+  // Regression: im Verwendungszweck steht oft nur der Vorgang, etwa
+  // "IMRE 0724/1279TG KR O 68". Frueher verlangte das Muster zwingend einen
+  // Index - solche Zahlungen blieben komplett ohne Aktenzeichen.
+
+  it('erkennt das blosse Aktenzeichen im Verwendungszweck', () => {
+    const { treffer } = extrahiereAusVerwendungszweck(
+      'IMRE 0724/1279TG KR O 68',
+      '2026-06-01',
+    );
+    expect(treffer).toHaveLength(1);
+    expect(treffer[0]!.normalisiert).toBe('0724/1279TG');
+    expect(treffer[0]!.basis).toBe('0724/1279TG');
+    expect(treffer[0]!.rechnungsindex).toBeUndefined();
+  });
+
+  it('parst es auch als direkte Eingabe', () => {
+    const az = parseAktenzeichen('0124/1234TG')!;
+    expect(az.basis).toBe('0124/1234TG');
+    expect(az.rechnungsindex).toBeUndefined();
+    expect(az.jahr).toBe('2024');
+  });
+
+  it('liest den Index weiterhin, wenn er dabeisteht', () => {
+    const az = parseAktenzeichen('0124/1234TG03')!;
+    expect(az.rechnungsindex).toBe('03');
+    expect(az.normalisiert).toBe('0124/1234TG03');
+  });
+
+  it('unterscheidet Aktenzeichen und Rechnungsnummer sauber', () => {
+    const vorgang = parseAktenzeichen('0124/1234TG')!;
+    const rechnung = parseAktenzeichen('0124/1234TG02')!;
+    expect(vorgang.basis).toBe(rechnung.basis);
+    expect(vorgang.normalisiert).not.toBe(rechnung.normalisiert);
+  });
+
+  it('liefert kein Index-Praefix, wenn der Index fehlt', () => {
+    expect(dateiPraefixMitIndex(parseAktenzeichen('0124/1234TG')!)).toBeUndefined();
+    expect(dateiPraefixMitIndex(parseAktenzeichen('0124/1234TG02')!)).toBe('0124_1234TG02');
+  });
+
+  it('sucht in beiden Faellen im selben Ordner', () => {
+    expect(dateiPraefix(parseAktenzeichen('0124/1234TG')!)).toBe('0124_1234TG');
+    expect(dateiPraefix(parseAktenzeichen('0124/1234TG03')!)).toBe('0124_1234TG');
+  });
+
+  it('erzeugt eine fuer den Workflow parsbare Eingabe', () => {
+    // Die Workflow-Regex ist /^(\d{4})\/(.*TG)\d+$/ - ohne Ziffern am Ende
+    // greift sie nicht.
+    const regex = /^(\d{4})\/(.*TG)\d+$/;
+    expect(workflowEingabe(parseAktenzeichen('0124/1234TG')!)).toMatch(regex);
+    expect(workflowEingabe(parseAktenzeichen('0124/1234TG03')!)).toMatch(regex);
+    expect(workflowEingabe(parseAktenzeichen('0124/1234TG03')!)).toBe('0124/1234TG03');
+  });
+});
+
 describe('Dateinamens-Praefixe fuer die OneDrive-Suche', () => {
   it('bildet die Basis ohne Rechnungsindex ab (so sucht der n8n-Workflow)', () => {
     const az = parseAktenzeichen('0126/1800TG01')!;
@@ -138,5 +201,10 @@ describe('Dateinamens-Praefixe fuer die OneDrive-Suche', () => {
   it('bildet die praezise Form mit Index ab (trennt TG01 von TG02)', () => {
     const az = parseAktenzeichen('0126/1800TG01')!;
     expect(dateiPraefixMitIndex(az)).toBe('0126_1800TG01');
+  });
+
+  it('normalisiert ein Aktenzeichen mit Leerzeichen und ohne Index', () => {
+    const { treffer } = extrahiereAusVerwendungszweck('AZ 0724/1279 TG', '2026-06-01');
+    expect(treffer[0]!.normalisiert).toBe('0724/1279TG');
   });
 });

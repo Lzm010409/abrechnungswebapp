@@ -1,6 +1,7 @@
 import {
   monatsGrenzen,
   type BelegDatei,
+  type LadeFortschritt,
   type Monat,
   type MonatsStatus,
   type Position,
@@ -37,6 +38,19 @@ export interface MonatsDienstAbhaengigkeiten {
   log?: { info: (o: unknown, m?: string) => void; warn: (o: unknown, m?: string) => void };
 }
 
+/**
+ * Nimmt Zwischenstaende des Ladevorgangs entgegen.
+ *
+ * Ohne Beobachter verhaelt sich alles wie vorher; mit Beobachter kann die
+ * Oberflaeche waehrend des Abrufs schon etwas zeigen, statt minutenlang auf
+ * eine einzige Antwort zu warten.
+ */
+export interface LadeBeobachter {
+  fortschritt(f: LadeFortschritt): void;
+  /** Buchungen stehen, Belege fehlen noch - reicht fuer die Tabelle. */
+  zwischenstand?(monat: Monat): void;
+}
+
 export class MonatsDienst {
   constructor(private readonly deps: MonatsDienstAbhaengigkeiten) {}
 
@@ -44,18 +58,22 @@ export class MonatsDienst {
    * Liefert den Monat. Ohne `neuLaden` kommt er aus dem Cache, sofern vorhanden -
    * ein Seitenwechsel in der UI loest also keinen sevDesk-Abruf aus.
    */
-  async lade(monat: string, neuLaden = false): Promise<Monat> {
+  async lade(
+    monat: string,
+    neuLaden = false,
+    beobachter?: LadeBeobachter,
+  ): Promise<Monat> {
     if (!neuLaden) {
       const zwischengespeichert = this.deps.db.ladeMonat(monat);
       if (zwischengespeichert) {
         return this.veredele(monat, zwischengespeichert.positionen, zwischengespeichert);
       }
     }
-    return this.synchronisiere(monat);
+    return this.synchronisiere(monat, beobachter);
   }
 
   /** Holt den Monat frisch aus sevDesk und laedt fehlende Belege nach. */
-  async synchronisiere(monat: string): Promise<Monat> {
+  async synchronisiere(monat: string, beobachter?: LadeBeobachter): Promise<Monat> {
     const { von, bis } = monatsGrenzen(monat);
     const { sevdesk, checkAccount, log } = this.deps;
 
@@ -64,20 +82,63 @@ export class MonatsDienst {
     const belegVon = verschiebeTage(von, -PUFFER_TAGE_RUECKWAERTS);
     const belegBis = verschiebeTage(bis, PUFFER_TAGE_VORWAERTS);
 
+    beobachter?.fortschritt({
+      phase: 'transaktionen',
+      text: `Bankbuchungen von ${checkAccount.name ?? checkAccount.id} werden geholt`,
+    });
+
     const [transaktionen, vouchers, invoices] = await Promise.all([
       sevdesk.holeTransaktionen(checkAccount.id, von, bis),
       sevdesk.holeVouchers(belegVon, belegBis),
       sevdesk.holeInvoices(belegVon, belegBis),
     ]);
 
+    beobachter?.fortschritt({
+      phase: 'transaktionen',
+      text: `${transaktionen.length} Buchungen im Monat`,
+      erledigt: transaktionen.length,
+      gesamt: transaktionen.length,
+    });
+    beobachter?.fortschritt({
+      phase: 'belege',
+      text: `${vouchers.length} Belege und ${invoices.length} Ausgangsrechnungen im Umfeld`,
+      erledigt: vouchers.length + invoices.length,
+      gesamt: vouchers.length + invoices.length,
+    });
+    beobachter?.fortschritt({
+      phase: 'verknuepfung',
+      text: 'Buchungen werden ihren Belegen zugeordnet',
+      gesamt: vouchers.length + invoices.length,
+      erledigt: 0,
+    });
+
     // Rueckwaerts-Indizes: sevDesk kennt nur Beleg -> Buchungen.
+    let verknuepft = 0;
+    const gesamtVerknuepfungen = vouchers.length + invoices.length;
+    const zaehleVerknuepfung = () => {
+      verknuepft++;
+      // Nicht jede einzelne Anfrage melden - das waere nur Rauschen im Stream.
+      if (verknuepft % 25 === 0 || verknuepft === gesamtVerknuepfungen) {
+        beobachter?.fortschritt({
+          phase: 'verknuepfung',
+          text: 'Buchungen werden ihren Belegen zugeordnet',
+          erledigt: verknuepft,
+          gesamt: gesamtVerknuepfungen,
+        });
+      }
+    };
+
     const [voucherProTransaktion, invoiceProTransaktion] = await Promise.all([
-      baueTransaktionsIndex(vouchers.map((v) => v.id), (id) =>
-        sevdesk.holeVoucherTransaktionen(id),
-      ),
-      baueTransaktionsIndex(invoices.map((i) => i.id), (id) =>
-        sevdesk.holeInvoiceTransaktionen(id),
-      ),
+      baueTransaktionsIndex(vouchers.map((v) => v.id), async (id) => {
+        const t = await sevdesk.holeVoucherTransaktionen(id);
+        zaehleVerknuepfung();
+        return t;
+      }),
+      baueTransaktionsIndex(invoices.map((i) => i.id), async (id) => {
+        const t = await sevdesk.holeInvoiceTransaktionen(id);
+        zaehleVerknuepfung();
+        return t;
+      }),
     ]);
 
     let positionen = baueBelege({
@@ -88,81 +149,123 @@ export class MonatsDienst {
       invoiceProTransaktion,
     });
 
-    positionen = await this.ladeDateien(monat, positionen);
+    // Ab hier steht die Tabelle bereits - nur die Dateien fehlen noch. Der
+    // Zwischenstand wird bewusst NICHT in den Cache geschrieben: bricht der
+    // Abruf danach ab, waere sonst ein Monat ohne Belege gespeichert.
+    if (beobachter?.zwischenstand) {
+      beobachter.zwischenstand(this.fuehreZusammen(monat, positionen));
+    }
+
+    beobachter?.fortschritt({
+      phase: 'dateien',
+      text: 'Belegdateien werden geladen',
+      erledigt: 0,
+      gesamt: positionen.length,
+    });
+
+    positionen = await this.ladeDateien(monat, positionen, beobachter);
+
+    beobachter?.fortschritt({ phase: 'fertig', text: 'Fertig' });
 
     return this.veredele(monat, positionen);
   }
 
   /** Laedt fuer jede Position die zugehoerigen Dateien und legt sie ab. */
-  private async ladeDateien(monat: string, positionen: Position[]): Promise<Position[]> {
+  private async ladeDateien(
+    monat: string,
+    positionen: Position[],
+    beobachter?: LadeBeobachter,
+  ): Promise<Position[]> {
     const { sevdesk, rechnungen, ablage, log } = this.deps;
+
+    let fertig = 0;
+    const melde = () => {
+      fertig++;
+      if (fertig % 5 === 0 || fertig === positionen.length) {
+        beobachter?.fortschritt({
+          phase: 'dateien',
+          text: 'Belegdateien werden geladen',
+          erledigt: fertig,
+          gesamt: positionen.length,
+        });
+      }
+    };
 
     return nacheinanderBegrenzt(positionen, 4, async (position) => {
       try {
-        if (position.typ === 'AUSGANG' && position.voucherId) {
-          const datei = await sevdesk.holeVoucherDatei(position.voucherId);
-          if (!datei) {
-            return { ...position, hinweis: 'Beleg in sevDesk ohne angehaengte Datei' };
-          }
-          const abgelegt = await ablage.speichere(
-            monat,
-            datei.daten,
-            datei.dateiname,
-            'sevdesk-voucher',
-            datei.mimeType,
-          );
-          return { ...position, dateien: [abgelegt], hinweis: undefined };
-        }
-
-        if (position.typ === 'EINGANG' && position.aktenzeichen) {
-          const ergebnis = await rechnungen.holeRechnung(
-            position.aktenzeichen,
-            position.invoiceId,
-          );
-
-          if (ergebnis.treffer.length === 0) {
-            return {
-              ...position,
-              hinweis:
-                ergebnis.fehler ??
-                `Keine Rechnung gefunden. Geprueft: ${ergebnis.versucht.join(', ')}`,
-            };
-          }
-
-          const abgelegt: BelegDatei[] = [];
-          for (const treffer of ergebnis.treffer) {
-            abgelegt.push(
-              await ablage.speichere(
-                monat,
-                treffer.daten,
-                treffer.dateiname,
-                treffer.quelle,
-                treffer.mimeType,
-              ),
-            );
-          }
-
-          // Mehrere Treffer heisst: der Nutzer muss entscheiden. Der erste
-          // wird vorgeschlagen, der Rest wandert in die Kandidatenliste.
-          if (abgelegt.length > 1) {
-            return {
-              ...position,
-              dateien: [abgelegt[0]!],
-              kandidaten: abgelegt.slice(1),
-              hinweis: `${abgelegt.length} moegliche Rechnungsdateien gefunden - bitte pruefen`,
-            };
-          }
-
-          return { ...position, dateien: abgelegt, hinweis: undefined };
-        }
-
-        return position;
+        return await this.ladeDateiFuer(monat, position);
       } catch (err) {
         const meldung = err instanceof Error ? err.message : String(err);
         log?.warn({ positionId: position.id, err: meldung }, 'Belegabruf fehlgeschlagen');
         return { ...position, hinweis: `Abruf fehlgeschlagen: ${meldung}` };
+      } finally {
+        melde();
       }
     });
+  }
+
+  /** Holt die Datei(en) genau einer Buchung. */
+  private async ladeDateiFuer(monat: string, position: Position): Promise<Position> {
+    const { sevdesk, rechnungen, ablage } = this.deps;
+
+    if (position.typ === 'AUSGANG' && position.voucherId) {
+      const datei = await sevdesk.holeVoucherDatei(position.voucherId);
+      if (!datei) {
+        return { ...position, hinweis: 'Beleg in sevDesk ohne angehaengte Datei' };
+      }
+      const abgelegt = await ablage.speichere(
+        monat,
+        datei.daten,
+        datei.dateiname,
+        'sevdesk-voucher',
+        datei.mimeType,
+      );
+      return { ...position, dateien: [abgelegt], hinweis: undefined };
+    }
+
+    if (position.typ === 'EINGANG' && position.aktenzeichen) {
+      const ergebnis = await rechnungen.holeRechnung(
+        position.aktenzeichen,
+        position.invoiceId,
+      );
+
+      if (ergebnis.treffer.length === 0) {
+        return {
+          ...position,
+          hinweis:
+            ergebnis.fehler ??
+            `Keine Rechnung gefunden. Geprueft: ${ergebnis.versucht.join(', ')}`,
+        };
+      }
+
+      const abgelegt: BelegDatei[] = [];
+      for (const treffer of ergebnis.treffer) {
+        abgelegt.push(
+          await ablage.speichere(
+            monat,
+            treffer.daten,
+            treffer.dateiname,
+            treffer.quelle,
+            treffer.mimeType,
+          ),
+        );
+      }
+
+      // Mehrere Treffer heisst: der Nutzer muss entscheiden. Der erste
+      // wird vorgeschlagen, der Rest wandert in die Kandidatenliste.
+      if (abgelegt.length > 1) {
+        return {
+          ...position,
+          dateien: [abgelegt[0]!],
+          kandidaten: abgelegt.slice(1),
+          hinweis: `${abgelegt.length} moegliche Rechnungsdateien gefunden - bitte pruefen`,
+        };
+      }
+
+      return { ...position, dateien: abgelegt, hinweis: undefined };
+    }
+
+    return position;
   }
 
   /**
@@ -175,19 +278,15 @@ export class MonatsDienst {
    * verloren waere.
    */
   private veredele(monat: string, rohPositionen: Position[], basis?: Monat): Monat {
-    const overrides = this.deps.db.ladeOverrides(monat);
-
-    const roh: Monat = {
-      monat,
-      checkAccountId: this.deps.checkAccount.id,
-      checkAccountName: this.deps.checkAccount.name,
-      positionen: rohPositionen,
-      summen: berechneSummen(rohPositionen),
-      verwaisteBelege: basis?.verwaisteBelege ?? [],
-      kontoauszuege: this.deps.db.ladeKontoauszuege(monat),
-      synchronisiertAm: basis?.synchronisiertAm ?? new Date().toISOString(),
-    };
+    const roh = this.baueRohmonat(monat, rohPositionen, basis);
     this.deps.db.speichereMonat(roh);
+    return this.fuehreZusammen(monat, rohPositionen, basis);
+  }
+
+  /** Wie `veredele`, aber ohne den Cache zu schreiben - fuer Zwischenstaende. */
+  private fuehreZusammen(monat: string, rohPositionen: Position[], basis?: Monat): Monat {
+    const roh = this.baueRohmonat(monat, rohPositionen, basis);
+    const overrides = this.deps.db.ladeOverrides(monat);
 
     const zusammengefuehrt = rohPositionen.map((p) => {
       const patch = overrides.get(p.id);
@@ -203,6 +302,19 @@ export class MonatsDienst {
       ...roh,
       positionen: zusammengefuehrt,
       summen: berechneSummen(zusammengefuehrt),
+    };
+  }
+
+  private baueRohmonat(monat: string, rohPositionen: Position[], basis?: Monat): Monat {
+    return {
+      monat,
+      checkAccountId: this.deps.checkAccount.id,
+      checkAccountName: this.deps.checkAccount.name,
+      positionen: rohPositionen,
+      summen: berechneSummen(rohPositionen),
+      verwaisteBelege: basis?.verwaisteBelege ?? [],
+      kontoauszuege: this.deps.db.ladeKontoauszuege(monat),
+      synchronisiertAm: basis?.synchronisiertAm ?? new Date().toISOString(),
     };
   }
 

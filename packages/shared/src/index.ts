@@ -32,18 +32,32 @@ export type PositionsStatus =
   /** Vom Nutzer bewusst ausgeblendet (z. B. Umbuchung) */
   | 'ignoriert';
 
+/**
+ * Aktenzeichen eines Vorgangs.
+ *
+ * Wichtige Unterscheidung:
+ *   Aktenzeichen   0126/1800TG      - identifiziert den Vorgang (den Ordner)
+ *   Rechnungsnummer 0126/1800TG01   - identifiziert eine Rechnung darin
+ *
+ * Zu einem Aktenzeichen koennen mehrere Rechnungen gehoeren (TG01 Gutachten,
+ * TG02 Fahrtkosten, TG03 ...). Im Verwendungszweck einer Zahlung steht oft nur
+ * das Aktenzeichen ohne Index - deshalb ist `rechnungsindex` optional.
+ */
 export interface Aktenzeichen {
-  /** Normalisierte Form, z. B. "0126/1800TG01" */
+  /** Vollstaendigste bekannte Form: mit Index falls bekannt, sonst die Basis */
   normalisiert: string;
   /** Monat zweistellig, z. B. "01" */
   monat: string;
   /** Jahr vierstellig, z. B. "2026" */
   jahr: string;
-  /** Schadennummer ohne fuehrende Nullen entfernt, z. B. "1800" */
+  /** Schadennummer, fuehrende Nullen bleiben erhalten, z. B. "1800" */
   schadennummer: string;
-  /** Rechnungsindex, z. B. "01" */
-  rechnungsindex: string;
-  /** Basis ohne Rechnungsindex, z. B. "0126/1800TG" (so sucht n8n) */
+  /**
+   * Rechnungsindex, z. B. "01". Fehlt, wenn im Verwendungszweck nur das
+   * Aktenzeichen ohne Rechnungsbezug stand.
+   */
+  rechnungsindex?: string;
+  /** Aktenzeichen ohne Index, z. B. "0126/1800TG" - damit sucht der Workflow */
   basis: string;
   /** Wie das Aktenzeichen ermittelt wurde */
   herkunft: AktenzeichenHerkunft;
@@ -203,8 +217,56 @@ export interface Monat {
   synchronisiertAm?: string;
 }
 
+/**
+ * Abschnitte des Ladevorgangs. Ein Monat aus sevDesk zu holen dauert je nach
+ * Buchungszahl deutlich laenger als eine Sekunde - die Oberflaeche zeigt
+ * deshalb an, woran gerade gearbeitet wird, statt nur "wird geladen".
+ */
+export type LadePhase =
+  /** Verbindung steht, es geht los */
+  | 'start'
+  /** Bankbuchungen des Monats */
+  | 'transaktionen'
+  /** Belege und Ausgangsrechnungen im Umfeld des Monats */
+  | 'belege'
+  /** Rueckwaerts-Index Buchung -> Beleg */
+  | 'verknuepfung'
+  /** Die Belegdateien selbst (langsamster Teil) */
+  | 'dateien'
+  | 'fertig';
+
+export interface LadeFortschritt {
+  phase: LadePhase;
+  /** Kurzer Text fuer die Oberflaeche */
+  text: string;
+  /** Bei zaehlbaren Phasen der Stand, sonst offen */
+  erledigt?: number;
+  gesamt?: number;
+}
+
+/** Ereignisse des Lade-Streams (Server-Sent Events). */
+export type LadeEreignis =
+  | { art: 'fortschritt'; fortschritt: LadeFortschritt }
+  /** Zwischenstand: Buchungen stehen, Belege fehlen noch */
+  | { art: 'teil'; monat: Monat }
+  | { art: 'fertig'; monat: Monat }
+  | { art: 'fehler'; fehler: string };
+
+/** Die angemeldete Person, aus dem Entra-ID-Token uebernommen. */
+export interface AngemeldeterBenutzer {
+  /** Eindeutige Kennung des Kontos im Tenant */
+  sub: string;
+  name: string;
+  email?: string;
+}
+
 /** Was der Server tatsaechlich kann - haengt an den gesetzten Env-Variablen. */
 export interface Capabilities {
+  /** false, wenn keine gueltige Sitzung besteht - dann ist nur /auth/login moeglich */
+  angemeldet?: boolean;
+  /** true, wenn der Server eine Anmeldung verlangt */
+  anmeldungNoetig?: boolean;
+  benutzer?: AngemeldeterBenutzer;
   /** ANTHROPIC_API_KEY gesetzt */
   ki: boolean;
   /** N8N_FIND_RECHNUNG_URL gesetzt */

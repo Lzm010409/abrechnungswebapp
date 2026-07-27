@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { PDFDocument } from 'pdf-lib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { Monat, MonatsStatus } from '@abrechnung/shared';
+import type { LadeEreignis, Monat, MonatsStatus } from '@abrechnung/shared';
 import { baueApp } from './app.js';
 import type { Config } from './config.js';
 import type { Datenbank } from './db/index.js';
@@ -44,6 +44,15 @@ function tx(
   };
 }
 
+/** Zerlegt eine Server-Sent-Events-Antwort in die einzelnen Ereignisse. */
+function leseEreignisse(rohtext: string): LadeEreignis[] {
+  return rohtext
+    .split('\n\n')
+    .flatMap((block) => block.split('\n'))
+    .filter((zeile) => zeile.startsWith('data:'))
+    .map((zeile) => JSON.parse(zeile.slice(5).trim()) as LadeEreignis);
+}
+
 function basisDaten(): MockDaten {
   return {
     checkAccounts: [
@@ -81,6 +90,9 @@ describe('End-to-End: gesamte Programmkette', () => {
       dataDir,
       sevdesk: { token: 'test-token', baseUrl: sevdesk.url },
       n8n: { findRechnungUrl: n8n.url },
+      // Die Fachlogik wird ohne Anmeldung geprueft; die Anmeldung selbst hat
+      // ihre eigene Testdatei (auth.test.ts).
+      auth: { deaktiviert: true, sicher: false, sessionDauer: 3600 },
       ...ueberschreibungen,
     };
     const instanz = await baueApp(config);
@@ -295,6 +307,135 @@ describe('End-to-End: gesamte Programmkette', () => {
       const ids = monat.positionen.map((p) => p.id);
       expect(ids).not.toContain('tx-mai');
       expect(ids).not.toContain('tx-juli');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('Lade-Stream fuer die Oberflaeche', () => {
+    // Der Abruf dauert je nach Buchungszahl viele Sekunden. Die Startseite soll
+    // deshalb nicht nur "wird geladen" zeigen, sondern sich aufbauen.
+
+    beforeEach(async () => {
+      const daten = basisDaten();
+      daten.transaktionen.push(
+        tx({
+          id: 'tx-aus', amount: '-119.00',
+          paymtPurpose: 'Telekom Rechnung',
+          valueDate: '2026-06-05T00:00:00+02:00',
+        }),
+      );
+      daten.vouchers.push({
+        id: 'v-1', objectName: 'Voucher', status: '1000',
+        supplierName: 'Telekom', sumGross: '119.00',
+      });
+      daten.voucherTransaktionen['v-1'] = ['tx-aus'];
+      daten.voucherDateien['v-1'] = await testPdf(1);
+
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp();
+    });
+
+    it('liefert einen Ereignisstrom statt einer einzelnen Antwort', async () => {
+      const res = await app.inject({ url: `/api/months/${MONAT}/stream` });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toContain('text/event-stream');
+      // Ohne diesen Kopf puffern Reverse-Proxies den Strom bis zum Ende.
+      expect(res.headers['x-accel-buffering']).toBe('no');
+
+      const ereignisse = leseEreignisse(res.payload);
+      expect(ereignisse.length).toBeGreaterThan(3);
+    });
+
+    it('meldet die Phasen in der richtigen Reihenfolge', async () => {
+      const ereignisse = leseEreignisse(
+        (await app.inject({ url: `/api/months/${MONAT}/stream` })).payload,
+      );
+      const phasen = ereignisse
+        .filter((e) => e.art === 'fortschritt')
+        .map((e) => (e.art === 'fortschritt' ? e.fortschritt.phase : ''));
+
+      expect(phasen[0]).toBe('start');
+      expect(phasen).toContain('transaktionen');
+      expect(phasen).toContain('belege');
+      expect(phasen).toContain('verknuepfung');
+      expect(phasen).toContain('dateien');
+      expect(phasen.at(-1)).toBe('fertig');
+    });
+
+    it('schickt die Buchungen schon vor den Belegdateien', async () => {
+      const ereignisse = leseEreignisse(
+        (await app.inject({ url: `/api/months/${MONAT}/stream` })).payload,
+      );
+
+      const teilIndex = ereignisse.findIndex((e) => e.art === 'teil');
+      const dateiIndex = ereignisse.findIndex(
+        (e) => e.art === 'fortschritt' && e.fortschritt.phase === 'dateien',
+      );
+
+      expect(teilIndex).toBeGreaterThanOrEqual(0);
+      expect(teilIndex).toBeLessThan(dateiIndex);
+
+      const teil = ereignisse[teilIndex] as Extract<LadeEreignis, { art: 'teil' }>;
+      expect(teil.monat.positionen).toHaveLength(1);
+      // Die Datei fehlt im Zwischenstand noch - genau darum geht es.
+      expect(teil.monat.positionen[0]!.dateien).toHaveLength(0);
+    });
+
+    it('endet mit dem vollstaendigen Monat', async () => {
+      const ereignisse = leseEreignisse(
+        (await app.inject({ url: `/api/months/${MONAT}/stream` })).payload,
+      );
+
+      const letztes = ereignisse.at(-1);
+      expect(letztes?.art).toBe('fertig');
+
+      const fertig = letztes as Extract<LadeEreignis, { art: 'fertig' }>;
+      expect(fertig.monat.positionen[0]!.dateien).toHaveLength(1);
+      expect(fertig.monat.positionen[0]!.status).toBe('ok');
+    });
+
+    it('liefert dasselbe Ergebnis wie der gewoehnliche Abruf', async () => {
+      const ueberStream = leseEreignisse(
+        (await app.inject({ url: `/api/months/${MONAT}/stream?refresh=true` })).payload,
+      ).at(-1) as Extract<LadeEreignis, { art: 'fertig' }>;
+
+      const gewoehnlich = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+
+      expect(ueberStream.monat.positionen).toEqual(gewoehnlich.positionen);
+      expect(ueberStream.monat.summen).toEqual(gewoehnlich.summen);
+    });
+
+    it('schreibt den Zwischenstand nicht in den Cache', async () => {
+      // Sonst waere nach einem Abbruch ein Monat ohne Belege gespeichert.
+      await app.inject({ url: `/api/months/${MONAT}/stream` });
+      const gespeichert = db.ladeMonat(MONAT)!;
+      expect(gespeichert.positionen[0]!.dateien).toHaveLength(1);
+    });
+
+    it('nutzt den Cache, wenn kein refresh verlangt wird', async () => {
+      await app.inject({ url: `/api/months/${MONAT}/stream` });
+      const nachErstem = sevdesk.aufrufe.length;
+
+      await app.inject({ url: `/api/months/${MONAT}/stream` });
+      expect(sevdesk.aufrufe.length).toBe(nachErstem);
+    });
+
+    it('weist einen ungueltigen Monat mit 400 ab, nicht im Strom', async () => {
+      const res = await app.inject({ url: '/api/months/Juni/stream' });
+      expect(res.statusCode).toBe(400);
+      expect(res.headers['content-type']).toContain('application/json');
+    });
+
+    it('meldet einen Ausfall als Ereignis, nicht als abgebrochene Verbindung', async () => {
+      await sevdesk.schliesse();
+
+      const res = await app.inject({ url: `/api/months/${MONAT}/stream?refresh=true` });
+      expect(res.statusCode).toBe(200);
+
+      const letztes = leseEreignisse(res.payload).at(-1);
+      expect(letztes?.art).toBe('fehler');
     });
   });
 
@@ -613,7 +754,7 @@ describe('End-to-End: gesamte Programmkette', () => {
     it('meldet einen erfolglosen Abruf mit den geprueften Varianten', async () => {
       const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
       expect(monat.positionen[0]!.status).toBe('offen');
-      expect(monat.positionen[0]!.hinweis).toContain('4 Varianten geprueft');
+      expect(monat.positionen[0]!.hinweis).toContain('2 Varianten geprueft');
     });
 
     it('faellt auf das sevDesk-PDF zurueck, wenn n8n nichts liefert', async () => {

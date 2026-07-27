@@ -7,6 +7,17 @@ services:
     environment:
       # Pflicht
       SEVDESK_API_TOKEN: ${SEVDESK_API_TOKEN:?SEVDESK_API_TOKEN fehlt}
+      # Pflicht - Anmeldung ueber Microsoft Entra ID
+      ENTRA_TENANT_ID: ${ENTRA_TENANT_ID:?ENTRA_TENANT_ID fehlt}
+      ENTRA_CLIENT_ID: ${ENTRA_CLIENT_ID:?ENTRA_CLIENT_ID fehlt}
+      ENTRA_CLIENT_SECRET: ${ENTRA_CLIENT_SECRET:?ENTRA_CLIENT_SECRET fehlt}
+      ENTRA_REDIRECT_URI: ${ENTRA_REDIRECT_URI:?ENTRA_REDIRECT_URI fehlt}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET fehlt}
+      # Optional - Zugang auf bestimmte Konten/Gruppen begrenzen
+      ENTRA_ERLAUBTE_BENUTZER: ${ENTRA_ERLAUBTE_BENUTZER:-}
+      ENTRA_ERLAUBTE_GRUPPEN: ${ENTRA_ERLAUBTE_GRUPPEN:-}
+      SESSION_DAUER_SEKUNDEN: ${SESSION_DAUER_SEKUNDEN:-28800}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
       # Optional - leer lassen, dann waehlt der Server das Konto selbst
       SEVDESK_CHECK_ACCOUNT_ID: ${SEVDESK_CHECK_ACCOUNT_ID:-}
       # Optional - Rechnungsabruf aus dem OneDrive-Gutachtenordner

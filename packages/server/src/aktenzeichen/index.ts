@@ -9,17 +9,29 @@ import type { Aktenzeichen, AktenzeichenHerkunft } from '@abrechnung/shared';
  * MM  Monat zweistellig
  * YY  Jahr zweistellig
  * TG  Kuerzel Gollenstede
- * XX  Rechnungsindex, in der Praxis 01 oder 02
+ * XX  Rechnungsindex - 01, 02, 03 ...
+ *
+ * Zu unterscheiden sind zwei Dinge, die leicht verwechselt werden:
+ *
+ *   Aktenzeichen    0126/1800TG      der Vorgang, entspricht dem OneDrive-Ordner
+ *   Rechnungsnummer 0126/1800TG01    eine einzelne Rechnung darin
+ *
+ * Im Verwendungszweck einer Zahlung steht oft nur das Aktenzeichen. Der
+ * Rechnungsindex ist deshalb optional.
  *
  * Die Regeln hier bilden references/aktenzeichen.md des urspruenglichen Skills ab.
  */
 
-/** Vollstaendiges Aktenzeichen, tolerant gegenueber Leerzeichen an allen Fugen. */
+/**
+ * Aktenzeichen mit MMYY-Praefix. Der Rechnungsindex hinter TG ist optional:
+ * im Verwendungszweck steht haeufig nur der Vorgang ("IMRE 0724/1279TG KR O 68"),
+ * nicht die konkrete Rechnung.
+ */
 const VOLLSTAENDIG =
-  /(\d{2})(\d{2})\s*\/\s*(\d{1,5})\s*TG\s*(\d{1,2})/gi;
+  /(\d{2})(\d{2})\s*\/\s*(\d{1,5})\s*TG\s*(\d{1,2})?(?!\d)/gi;
 
-/** Nur Schadennummer + Index, MMYY fehlt - z. B. "1800TG01". */
-const OHNE_PRAEFIX = /(?<![\d/])(\d{1,5})\s*TG\s*(\d{1,2})(?!\d)/gi;
+/** Nur Schadennummer (+ optionaler Index), MMYY fehlt - z. B. "1800TG01". */
+const OHNE_PRAEFIX = /(?<![\d/])(\d{1,5})\s*TG\s*(\d{1,2})?(?!\d)/gi;
 
 /**
  * Mehrdeutige Schreibweise wie "Rechnung 1800/26" - Zahl/Zahl ohne TG.
@@ -46,17 +58,17 @@ function baue(
   mm: string,
   yy: string,
   schadennummer: string,
-  index: string,
+  index: string | undefined,
   herkunft: AktenzeichenHerkunft,
 ): Aktenzeichen | null {
   if (!istGueltigerMonat(mm)) return null;
 
   // Rechnungsindex wird immer zweistellig geschrieben: "1" -> "01"
-  const rechnungsindex = index.padStart(2, '0');
+  const rechnungsindex = index ? index.padStart(2, '0') : undefined;
   const basis = `${mm}${yy}/${schadennummer}TG`;
 
   return {
-    normalisiert: `${basis}${rechnungsindex}`,
+    normalisiert: rechnungsindex ? `${basis}${rechnungsindex}` : basis,
     monat: mm,
     jahr: `20${yy}`,
     schadennummer,
@@ -82,7 +94,7 @@ export function parseAktenzeichen(
     string,
     string,
     string,
-    string,
+    string | undefined,
   ];
   return baue(mm, yy, nummer, index, herkunft);
 }
@@ -114,7 +126,7 @@ export function extrahiereAusVerwendungszweck(
       string,
       string,
       string,
-      string,
+      string | undefined,
     ];
     const az = baue(mm, yy, nummer, index, 'verwendungszweck');
     if (az && !gesehen.has(az.normalisiert)) {
@@ -129,7 +141,11 @@ export function extrahiereAusVerwendungszweck(
     const { mm, yy } = mmyyAusDatum(buchungsdatum);
     OHNE_PRAEFIX.lastIndex = 0;
     for (const m of rest.matchAll(OHNE_PRAEFIX)) {
-      const [, nummer, index] = m as unknown as [string, string, string];
+      const [, nummer, index] = m as unknown as [
+        string,
+        string,
+        string | undefined,
+      ];
       const az = baue(mm, yy, nummer, index, 'verwendungszweck');
       if (az && !gesehen.has(az.normalisiert)) {
         gesehen.add(az.normalisiert);
@@ -158,31 +174,36 @@ function mmyyAusDatum(isoDatum: string): { mm: string; yy: string } {
 }
 
 /**
- * Retry-Kette fuer den Rechnungsabruf, wenn der erste Versuch leer bleibt.
- * Reihenfolge folgt "Sonderfaelle / MCP-Fehler" aus aktenzeichen.md:
+ * Eingabewert fuer den n8n-Workflow "Find Rechnung".
  *
- *   1. das Aktenzeichen selbst (bereits normalisiert, Leerzeichen sind weg)
- *   2. Vormonat - das Buchungsdatum liegt bis zu 30 Tage nach dem Rechnungsdatum
- *   3. anderer Rechnungsindex (TG01 <-> TG02)
- *   4. Vormonat kombiniert mit anderem Index
+ * Der Workflow zerlegt seine Eingabe mit /^(\d{4})\/(.*TG)\d+$/ und verwirft
+ * den Index sofort wieder: gesucht wird der Gutachtenordner zum AKTENZEICHEN,
+ * anschliessend per startsWith ueber alle Dateien darin. Der Index veraendert
+ * das Suchergebnis also nicht - er muss aber vorhanden sein, sonst greift die
+ * Regex nicht und der Workflow liefert null.
  *
- * Duplikate werden entfernt, die Reihenfolge bleibt erhalten.
+ * Ist der Index unbekannt, wird deshalb "01" angehaengt. Das ist kein Raten:
+ * der Wert wird vom Workflow verworfen, bevor er irgendetwas beeinflusst.
+ */
+export function workflowEingabe(az: Aktenzeichen): string {
+  return `${az.basis}${az.rechnungsindex ?? '01'}`;
+}
+
+/**
+ * Varianten fuer den Rechnungsabruf, wenn der erste Versuch leer bleibt.
+ *
+ * Variiert wird ausschliesslich der Monat: das Buchungsdatum kann bis zu
+ * 30 Tage nach dem Rechnungsdatum liegen, das Aktenzeichen gehoert dann zum
+ * Vormonat. Ueber den Rechnungsindex zu variieren waere sinnlos, weil der
+ * Workflow ihn ohnehin verwirft (siehe workflowEingabe).
  */
 export function erzeugeVarianten(az: Aktenzeichen): string[] {
-  const varianten: string[] = [];
-  const hinzu = (s: string) => {
-    if (!varianten.includes(s)) varianten.push(s);
-  };
+  const varianten = [workflowEingabe(az)];
 
   const vormonat = verschiebeMonat(az, -1);
-  const andererIndex = tauscheIndex(az);
-
-  hinzu(az.normalisiert);
-  if (vormonat) hinzu(vormonat.normalisiert);
-  if (andererIndex) hinzu(andererIndex.normalisiert);
-  if (vormonat && andererIndex) {
-    const kombiniert = tauscheIndex(vormonat);
-    if (kombiniert) hinzu(kombiniert.normalisiert);
+  if (vormonat) {
+    const eingabe = workflowEingabe(vormonat);
+    if (!varianten.includes(eingabe)) varianten.push(eingabe);
   }
 
   return varianten;
@@ -197,23 +218,20 @@ function verschiebeMonat(az: Aktenzeichen, delta: number): Aktenzeichen | null {
   return baue(mm, yy, az.schadennummer, az.rechnungsindex, az.herkunft);
 }
 
-function tauscheIndex(az: Aktenzeichen): Aktenzeichen | null {
-  // In der Praxis existieren nur TG01 und TG02 (Gutachten / Fahrtkosten).
-  if (az.rechnungsindex !== '01' && az.rechnungsindex !== '02') return null;
-  const neu = az.rechnungsindex === '01' ? '02' : '01';
-  return baue(az.monat, az.jahr.slice(2), az.schadennummer, neu, az.herkunft);
-}
-
 /**
- * Dateinamens-Praefix, mit dem der n8n-Workflow im OneDrive-Ordner sucht.
- * Achtung: der Workflow filtert per startsWith auf die Basis OHNE Rechnungsindex,
- * liefert also bei TG01 und TG02 potenziell beide Dateien zurueck.
+ * Dateinamens-Praefix des Aktenzeichens, so wie der Workflow im
+ * OneDrive-Ordner filtert: "0126/1800TG" -> "0126_1800TG".
+ * Trifft damit alle Rechnungen des Vorgangs (TG01, TG02, TG03 ...).
  */
 export function dateiPraefix(az: Aktenzeichen): string {
   return az.basis.replace(/\//g, '_');
 }
 
-/** Praefix inklusive Rechnungsindex - damit laesst sich TG01 von TG02 trennen. */
-export function dateiPraefixMitIndex(az: Aktenzeichen): string {
-  return az.normalisiert.replace(/\//g, '_');
+/**
+ * Praefix inklusive Rechnungsindex - nur nutzbar, wenn der Index bekannt ist.
+ * Damit laesst sich eine konkrete Rechnung aus mehreren Treffern herausloesen.
+ */
+export function dateiPraefixMitIndex(az: Aktenzeichen): string | undefined {
+  if (!az.rechnungsindex) return undefined;
+  return `${az.basis}${az.rechnungsindex}`.replace(/\//g, '_');
 }

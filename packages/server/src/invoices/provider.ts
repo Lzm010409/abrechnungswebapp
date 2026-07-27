@@ -134,7 +134,28 @@ export class StandardRechnungsProvider implements RechnungsProvider {
         throw new Error(`n8n antwortete mit HTTP ${res.status}`);
       }
 
-      const roh = (await res.json()) as N8nAntwortEintrag[] | N8nAntwortEintrag;
+      const contentType = res.headers.get('content-type') ?? '';
+      const rohdaten = Buffer.from(await res.arrayBuffer());
+
+      // Der Workflow antwortet als JSON-Array. Wird er aber auf "Respond with
+      // binary" umgestellt, kommt die PDF-Datei direkt - dann waere ein
+      // bedingungsloses res.json() an einem "%PDF-" zerbrochen.
+      if (!contentType.includes('json')) {
+        if (rohdaten.byteLength === 0) return [];
+        return [
+          {
+            daten: rohdaten,
+            dateiname: `${rechnungsnummer.replace(/\//g, '_')}.pdf`,
+            mimeType: contentType.split(';')[0]?.trim() || 'application/pdf',
+            gefundenMit: rechnungsnummer,
+            quelle: 'onedrive-n8n' as const,
+          },
+        ];
+      }
+
+      const roh = JSON.parse(rohdaten.toString('utf8')) as
+        | N8nAntwortEintrag[]
+        | N8nAntwortEintrag;
       const liste = Array.isArray(roh) ? roh : [roh];
 
       // Der Workflow filtert per startsWith auf die Basis OHNE Rechnungsindex.
@@ -157,17 +178,22 @@ export class StandardRechnungsProvider implements RechnungsProvider {
   }
 
   /**
-   * Grenzt mehrere Treffer auf den passenden Rechnungsindex ein.
+   * Grenzt mehrere Treffer auf eine konkrete Rechnung ein - aber nur, wenn der
+   * Rechnungsindex ueberhaupt bekannt ist.
    *
-   * Beispiel: gesucht ist 0126/1800TG01, n8n liefert wegen des startsWith-Filters
-   * sowohl "0126_1800TG01_Rechnung.pdf" als auch "0126_1800TG02_Rechnung.pdf".
-   * Passt genau eine Datei exakt, gewinnt sie; sonst bleiben alle als Kandidaten
-   * stehen und der Nutzer entscheidet.
+   * Der Workflow filtert im Gutachtenordner per startsWith auf das
+   * AKTENZEICHEN und liefert damit alle Rechnungen des Vorgangs zurueck
+   * (TG01 Gutachten, TG02 Fahrtkosten, TG03 ...). Stand im Verwendungszweck
+   * nur "0724/1279TG" ohne Index, gibt es nichts, woran man die richtige
+   * erkennen koennte - dann bleiben alle als Kandidaten stehen und der Nutzer
+   * entscheidet. Ein Zugriff auf [0] waere hier geraten.
    */
   private praezisiere(treffer: RechnungsTreffer[], az: Aktenzeichen): RechnungsTreffer[] {
     if (treffer.length <= 1) return treffer;
 
     const exakt = dateiPraefixMitIndex(az);
+    if (!exakt) return treffer;
+
     const genau = treffer.filter((t) => t.dateiname.includes(exakt));
     return genau.length === 1 ? genau : treffer;
   }

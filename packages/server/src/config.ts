@@ -43,6 +43,94 @@ export interface Config {
     /** Nur gesetzt, wenn bewusst ein Gateway davorgeschaltet ist. */
     baseUrl?: string;
   };
+
+  auth: {
+    /** true nur bei ausdruecklichem AUTH_MODE=disabled - fuer lokale Arbeit. */
+    deaktiviert: boolean;
+    /** Cookies nur ueber HTTPS ausliefern. */
+    sicher: boolean;
+    sessionDauer: number;
+    entra?: {
+      tenantId: string;
+      clientId: string;
+      clientSecret: string;
+      redirectUri: string;
+      sessionSecret: string;
+      erlaubteBenutzer: string[];
+      erlaubteGruppen: string[];
+    };
+  };
+}
+
+function liste(name: string): string[] {
+  return (env(name) ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Anmeldung ist Pflicht, sofern sie nicht ausdruecklich abgeschaltet wurde.
+ *
+ * Die Anwendung zeigt Kontobewegungen und Belege eines Buelros. Faellt die
+ * Konfiguration weg, darf sie nicht einfach offen weiterlaufen - der Server
+ * verweigert dann den Start und sagt, was fehlt.
+ */
+function ladeAuth(): Config['auth'] {
+  const sessionDauer = Number(env('SESSION_DAUER_SEKUNDEN') ?? 8 * 60 * 60);
+  const sicher = (env('COOKIE_SECURE') ?? 'true') !== 'false';
+
+  if (env('AUTH_MODE') === 'disabled') {
+    return { deaktiviert: true, sicher, sessionDauer };
+  }
+
+  const tenantId = env('ENTRA_TENANT_ID');
+  const clientId = env('ENTRA_CLIENT_ID');
+  const clientSecret = env('ENTRA_CLIENT_SECRET');
+  const redirectUri = env('ENTRA_REDIRECT_URI');
+  const sessionSecret = env('SESSION_SECRET');
+
+  const fehlend = [
+    ['ENTRA_TENANT_ID', tenantId],
+    ['ENTRA_CLIENT_ID', clientId],
+    ['ENTRA_CLIENT_SECRET', clientSecret],
+    ['ENTRA_REDIRECT_URI', redirectUri],
+    ['SESSION_SECRET', sessionSecret],
+  ]
+    .filter(([, wert]) => !wert)
+    .map(([name]) => name);
+
+  if (fehlend.length > 0) {
+    throw new Error(
+      `Anmeldung ist nicht konfiguriert. Es fehlt: ${fehlend.join(', ')}.\n` +
+        'Die Anwendung startet ohne Anmeldung nicht, weil sie Kontobewegungen ' +
+        'und Belege offenlegt.\n' +
+        'Einrichtung siehe README, Abschnitt "Anmeldung (Microsoft Entra ID)".\n' +
+        'Nur fuer die lokale Arbeit ohne Entra: AUTH_MODE=disabled setzen.',
+    );
+  }
+
+  if (sessionSecret!.length < 32) {
+    throw new Error(
+      'SESSION_SECRET ist zu kurz. Es signiert die Sitzungscookies und braucht ' +
+        'mindestens 32 Zeichen. Erzeugen mit: openssl rand -base64 48',
+    );
+  }
+
+  return {
+    deaktiviert: false,
+    sicher,
+    sessionDauer,
+    entra: {
+      tenantId: tenantId!,
+      clientId: clientId!,
+      clientSecret: clientSecret!,
+      redirectUri: redirectUri!,
+      sessionSecret: sessionSecret!,
+      erlaubteBenutzer: liste('ENTRA_ERLAUBTE_BENUTZER'),
+      erlaubteGruppen: liste('ENTRA_ERLAUBTE_GRUPPEN'),
+    },
+  };
 }
 
 const ERLAUBTE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -96,5 +184,7 @@ export function ladeConfig(): Config {
           baseUrl: env('ANTHROPIC_BASE_URL'),
         }
       : undefined,
+
+    auth: ladeAuth(),
   };
 }

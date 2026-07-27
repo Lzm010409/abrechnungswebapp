@@ -1,5 +1,6 @@
 import type {
   Capabilities,
+  LadeEreignis,
   Monat,
   MonatsReview,
   PositionsPatch,
@@ -37,11 +38,70 @@ async function anfrage<T>(pfad: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/**
+ * Liest den Lade-Stream (Server-Sent Events) Ereignis fuer Ereignis.
+ *
+ * Bewusst ueber fetch statt EventSource: EventSource verbindet nach dem Ende
+ * des Streams automatisch neu und wuerde den kompletten Abruf wiederholen -
+ * und es kann keinen 401 von einem normalen Verbindungsabbruch unterscheiden.
+ */
+export async function leseLadeStream(
+  monat: string,
+  optionen: { neuLaden?: boolean; signal?: AbortSignal },
+  aufEreignis: (ereignis: LadeEreignis) => void,
+): Promise<void> {
+  const res = await fetch(
+    `/api/months/${monat}/stream${optionen.neuLaden ? '?refresh=true' : ''}`,
+    { headers: { Accept: 'text/event-stream' }, signal: optionen.signal },
+  );
+
+  if (!res.ok) {
+    let meldung = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { fehler?: string };
+      if (body.fehler) meldung = body.fehler;
+    } catch {
+      // kein JSON - Statuscode genuegt
+    }
+    throw new ApiFehler(meldung, res.status);
+  }
+  if (!res.body) throw new ApiFehler('Der Server liefert keinen Datenstrom.', 500);
+
+  const leser = res.body.getReader();
+  const dekoder = new TextDecoder();
+  let puffer = '';
+
+  for (;;) {
+    const { done, value } = await leser.read();
+    if (done) break;
+    puffer += dekoder.decode(value, { stream: true });
+
+    let ende = puffer.indexOf('\n\n');
+    while (ende >= 0) {
+      const block = puffer.slice(0, ende);
+      puffer = puffer.slice(ende + 2);
+      for (const zeile of block.split('\n')) {
+        if (!zeile.startsWith('data:')) continue;
+        aufEreignis(JSON.parse(zeile.slice(5).trim()) as LadeEreignis);
+      }
+      ende = puffer.indexOf('\n\n');
+    }
+  }
+}
+
 export const api = {
   capabilities: () => anfrage<Capabilities>('/api/capabilities'),
 
   monat: (monat: string, neuLaden = false) =>
     anfrage<Monat>(`/api/months/${monat}${neuLaden ? '?refresh=true' : ''}`),
+
+  stream: leseLadeStream,
+
+  abmelden: (auchBeiMicrosoft = false) =>
+    anfrage<{ abgemeldet: boolean; weiterZu?: string }>('/auth/logout', {
+      method: 'POST',
+      body: JSON.stringify({ abmeldenBeiMicrosoft: auchBeiMicrosoft }),
+    }),
 
   synchronisiere: (monat: string) =>
     anfrage<Monat>(`/api/months/${monat}/sync`, { method: 'POST' }),

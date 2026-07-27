@@ -1,14 +1,23 @@
-import { useCallback, useEffect, useState } from 'react';
-import type { Capabilities, Monat, MonatsReview } from '@abrechnung/shared';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type {
+  Capabilities,
+  LadeFortschritt,
+  LadePhase,
+  Monat,
+  MonatsReview,
+} from '@abrechnung/shared';
 import {
   aktuellerMonat,
   api,
+  ApiFehler,
   euro,
   monatsTitel,
   verschiebeMonat,
 } from './api/client';
+import { Anmeldung } from './components/Anmeldung';
 import { Detailbereich } from './components/Detailbereich';
 import { Kontoauszuege } from './components/Kontoauszuege';
+import { Ladefortschritt } from './components/Ladefortschritt';
 import { PositionenTabelle } from './components/PositionenTabelle';
 
 export function App() {
@@ -18,8 +27,11 @@ export function App() {
   const [ausgewaehlt, setAusgewaehlt] = useState<string>();
   const [review, setReview] = useState<MonatsReview>();
   const [laedt, setLaedt] = useState(false);
+  const [phasen, setPhasen] = useState<Map<LadePhase, LadeFortschritt>>(new Map());
   const [meldung, setMeldung] = useState<string>();
   const [fehler, setFehler] = useState<string>();
+  /** Bricht einen noch laufenden Lade-Stream ab, wenn der Monat wechselt. */
+  const abbruch = useRef<AbortController | null>(null);
 
   useEffect(() => {
     api.capabilities().then(setFaehigkeiten).catch((err) => setFehler(String(err)));
@@ -27,14 +39,54 @@ export function App() {
 
   const laden = useCallback(
     async (neuLaden = false) => {
+      abbruch.current?.abort();
+      const steuerung = new AbortController();
+      abbruch.current = steuerung;
+
       setLaedt(true);
       setFehler(undefined);
+      setPhasen(new Map());
+
       try {
-        setDaten(await api.monat(monat, neuLaden));
+        await api.stream(monat, { neuLaden, signal: steuerung.signal }, (ereignis) => {
+          switch (ereignis.art) {
+            case 'fortschritt':
+              setPhasen((alt) => {
+                const neu = new Map(alt);
+                neu.set(ereignis.fortschritt.phase, ereignis.fortschritt);
+                return neu;
+              });
+              break;
+            // Zwischenstand: die Buchungen stehen schon, die Belege noch nicht.
+            // Die Tabelle wird damit sofort sichtbar.
+            case 'teil':
+            case 'fertig':
+              setDaten(ereignis.monat);
+              break;
+            case 'fehler':
+              setFehler(ereignis.fehler);
+              break;
+          }
+        });
       } catch (err) {
-        setFehler(err instanceof Error ? err.message : String(err));
+        if (steuerung.signal.aborted) return;
+
+        // Sitzung abgelaufen: die Faehigkeiten neu holen, damit die Anwendung
+        // die Anmeldeseite zeigt statt einer nichtssagenden Fehlermeldung.
+        if (err instanceof ApiFehler && err.status === 401) {
+          setFaehigkeiten(await api.capabilities().catch(() => undefined));
+          return;
+        }
+
+        // Kein Strom moeglich (puffernder Reverse-Proxy)? Dann eben klassisch -
+        // die Anwendung darf daran nicht scheitern.
+        try {
+          setDaten(await api.monat(monat, neuLaden));
+        } catch (zweiter) {
+          setFehler(zweiter instanceof Error ? zweiter.message : String(zweiter));
+        }
       } finally {
-        setLaedt(false);
+        if (!steuerung.signal.aborted) setLaedt(false);
       }
     },
     [monat],
@@ -43,7 +95,9 @@ export function App() {
   useEffect(() => {
     setAusgewaehlt(undefined);
     setReview(undefined);
+    setDaten(null);
     void laden();
+    return () => abbruch.current?.abort();
   }, [laden]);
 
   const mitLadeanzeige = async (arbeit: () => Promise<void>) => {
@@ -61,6 +115,12 @@ export function App() {
 
   const position = daten?.positionen.find((p) => p.id === ausgewaehlt);
   const s = daten?.summen;
+
+  // Solange die Faehigkeiten nicht da sind, ist unklar, ob eine Anmeldung
+  // noetig ist - dann waere jede Anzeige geraten.
+  if (faehigkeiten && faehigkeiten.anmeldungNoetig && !faehigkeiten.angemeldet) {
+    return <Anmeldung />;
+  }
 
   return (
     <div className="app">
@@ -94,6 +154,22 @@ export function App() {
             {faehigkeiten.checkAccountName ?? faehigkeiten.checkAccountId}
             {!faehigkeiten.n8nRechnungsabruf && ' · OneDrive-Abruf inaktiv'}
             {!faehigkeiten.ki && ' · KI inaktiv'}
+            {faehigkeiten.benutzer && (
+              <>
+                {' · '}
+                {faehigkeiten.benutzer.name}
+                {faehigkeiten.anmeldungNoetig && (
+                  <button
+                    className="verweis"
+                    onClick={() =>
+                      void api.abmelden().then(() => window.location.reload())
+                    }
+                  >
+                    abmelden
+                  </button>
+                )}
+              </>
+            )}
           </div>
         )}
       </header>
@@ -108,15 +184,7 @@ export function App() {
           {s.anzahlNichtZugeordnet} Buchung
           {s.anzahlNichtZugeordnet === 1 ? '' : 'en'} in sevDesk noch nicht zugeordnet.
           Dort verbuchen, dann hier neu laden.
-          <button
-            className="inline"
-            disabled={laedt}
-            onClick={() =>
-              mitLadeanzeige(async () => {
-                setDaten(await api.synchronisiere(monat));
-              })
-            }
-          >
+          <button className="inline" disabled={laedt} onClick={() => void laden(true)}>
             Jetzt neu laden
           </button>
         </div>
@@ -137,7 +205,7 @@ export function App() {
 
       <main>
         <div className="liste">
-          {laedt && !daten && <p className="leer">Lade Monat…</p>}
+          {laedt && <Ladefortschritt phasen={phasen} laeuft={laedt} />}
           {daten && (
             <PositionenTabelle
               positionen={daten.positionen}
@@ -197,10 +265,11 @@ export function App() {
         <button
           disabled={laedt}
           onClick={() =>
-            mitLadeanzeige(async () => {
-              setDaten(await api.synchronisiere(monat));
-              setMeldung('Monat aus sevDesk neu geladen. Manuelle Korrekturen blieben erhalten.');
-            })
+            void laden(true).then(() =>
+              setMeldung(
+                'Monat aus sevDesk neu geladen. Manuelle Korrekturen blieben erhalten.',
+              ),
+            )
           }
         >
           Aus sevDesk laden

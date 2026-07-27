@@ -6,10 +6,25 @@ import type { SevDeskClient } from '../sevdesk/client.js';
 const AZ = parseAktenzeichen('0126/1800TG01')!;
 
 function pdfAntwort(eintraege: Array<{ file: string; filename: string }>) {
+  const koerper = Buffer.from(JSON.stringify(eintraege), 'utf8');
   return {
     ok: true,
     status: 200,
-    json: async () => eintraege,
+    headers: { get: (k: string) => (k.toLowerCase() === 'content-type' ? 'application/json' : null) },
+    arrayBuffer: async () =>
+      koerper.buffer.slice(koerper.byteOffset, koerper.byteOffset + koerper.byteLength),
+  } as unknown as Response;
+}
+
+/** n8n-Antwort als roher Dateistrom - moeglich, wenn der Workflow auf
+ *  "Respond with binary" umgestellt wird. */
+function binaerAntwort(daten: Buffer) {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (k: string) => (k.toLowerCase() === 'content-type' ? 'application/pdf' : null) },
+    arrayBuffer: async () =>
+      daten.buffer.slice(daten.byteOffset, daten.byteOffset + daten.byteLength),
   } as unknown as Response;
 }
 
@@ -54,13 +69,12 @@ describe('StandardRechnungsProvider - n8n', () => {
     expect(JSON.parse(init.body as string)).toEqual({ Rechnungsnummer: '0126/1800TG01' });
   });
 
-  it('arbeitet die Retry-Kette ab, wenn der erste Versuch leer bleibt', async () => {
-    // Erst beim dritten Versuch (anderer Rechnungsindex) gibt es einen Treffer.
+  it('probiert den Vormonat, wenn der erste Versuch leer bleibt', async () => {
     let aufrufe = 0;
     const fetchImpl = vi.fn(async () => {
       aufrufe++;
-      if (aufrufe < 3) return pdfAntwort([]);
-      return pdfAntwort([{ file: b64('PDF'), filename: '0126_1800TG02_Rechnung.pdf' }]);
+      if (aufrufe < 2) return pdfAntwort([]);
+      return pdfAntwort([{ file: b64('PDF'), filename: '1225_1800TG01_Rechnung.pdf' }]);
     });
 
     const provider = new StandardRechnungsProvider(leererSevDesk, {
@@ -70,12 +84,45 @@ describe('StandardRechnungsProvider - n8n', () => {
 
     const ergebnis = await provider.holeRechnung(AZ);
 
-    expect(ergebnis.versucht).toEqual([
-      '0126/1800TG01',
-      '1225/1800TG01',
-      '0126/1800TG02',
-    ]);
-    expect(ergebnis.treffer[0]!.gefundenMit).toBe('0126/1800TG02');
+    expect(ergebnis.versucht).toEqual(['0126/1800TG01', '1225/1800TG01']);
+    expect(ergebnis.treffer[0]!.gefundenMit).toBe('1225/1800TG01');
+  });
+
+  it('stellt bei unbekanntem Index alle Rechnungen des Vorgangs zur Auswahl', async () => {
+    // "0724/1279TG" ohne Index: es gibt keinen Anhaltspunkt, welche der
+    // Rechnungen gemeint ist - also entscheidet der Nutzer.
+    const ohneIndex = parseAktenzeichen('0126/1800TG')!;
+    const fetchImpl = vi.fn(async () =>
+      pdfAntwort([
+        { file: b64('A'), filename: '0126_1800TG01_Rechnung.pdf' },
+        { file: b64('B'), filename: '0126_1800TG02_Rechnung.pdf' },
+      ]),
+    );
+
+    const provider = new StandardRechnungsProvider(leererSevDesk, {
+      url: 'http://n8n.local/webhook/find',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const ergebnis = await provider.holeRechnung(ohneIndex);
+    expect(ergebnis.treffer).toHaveLength(2);
+    expect(ergebnis.versucht[0]).toBe('0126/1800TG01');
+  });
+
+  it('findet auch eine Rechnung mit Index 03', async () => {
+    const ohneIndex = parseAktenzeichen('0126/1800TG')!;
+    const fetchImpl = vi.fn(async () =>
+      pdfAntwort([{ file: b64('C'), filename: '0126_1800TG03_Rechnung.pdf' }]),
+    );
+
+    const provider = new StandardRechnungsProvider(leererSevDesk, {
+      url: 'http://n8n.local/webhook/find',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const ergebnis = await provider.holeRechnung(ohneIndex);
+    expect(ergebnis.treffer).toHaveLength(1);
+    expect(ergebnis.treffer[0]!.dateiname).toBe('0126_1800TG03_Rechnung.pdf');
   });
 
   it('grenzt mehrere Treffer auf den exakten Rechnungsindex ein', async () => {
@@ -113,6 +160,19 @@ describe('StandardRechnungsProvider - n8n', () => {
 
     const ergebnis = await provider.holeRechnung(AZ);
     expect(ergebnis.treffer).toHaveLength(2);
+  });
+
+  it('nimmt auch einen rohen Dateistrom entgegen', async () => {
+    const pdf = Buffer.from('%PDF-1.4 Rechnung');
+    const provider = new StandardRechnungsProvider(leererSevDesk, {
+      url: 'http://n8n.local/webhook/find',
+      fetchImpl: (async () => binaerAntwort(pdf)) as unknown as typeof fetch,
+    });
+
+    const ergebnis = await provider.holeRechnung(AZ);
+    expect(ergebnis.treffer).toHaveLength(1);
+    expect(ergebnis.treffer[0]!.daten.equals(pdf)).toBe(true);
+    expect(ergebnis.treffer[0]!.dateiname).toBe('0126_1800TG01.pdf');
   });
 
   it('ignoriert Eintraege ohne file-Feld', async () => {
@@ -164,8 +224,8 @@ describe('StandardRechnungsProvider - Rueckfallebene sevDesk', () => {
 
     const ergebnis = await provider.holeRechnung(AZ, 'inv-1');
     expect(ergebnis.treffer[0]!.quelle).toBe('sevdesk-invoice');
-    // Alle vier Varianten wurden vorher bei n8n probiert.
-    expect(ergebnis.versucht).toHaveLength(4);
+    // Beide Monatsvarianten wurden vorher bei n8n probiert.
+    expect(ergebnis.versucht).toEqual(['0126/1800TG01', '1225/1800TG01']);
   });
 
   it('meldet einen klaren Fehler, wenn gar nichts konfiguriert ist', async () => {

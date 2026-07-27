@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { istGueltigerMonat, type Capabilities, type Kontoauszug } from '@abrechnung/shared';
+import {
+  istGueltigerMonat,
+  type Capabilities,
+  type Kontoauszug,
+  type LadeEreignis,
+} from '@abrechnung/shared';
 import type { KiDienst } from '../ai/client.js';
 import type { Datenbank } from '../db/index.js';
 import type { MonatsDienst } from '../monatsdienst.js';
@@ -17,6 +22,7 @@ export interface RoutenKontext {
   ki?: KiDienst;
   n8nAktiv: boolean;
   kiModell?: string;
+  authDeaktiviert: boolean;
 }
 
 /** Wirft einen 400er, wenn der Monatsparameter nicht YYYY-MM ist. */
@@ -25,6 +31,19 @@ function pruefeMonat(monat: string): string {
     throw new EingabeFehler(`"${monat}" ist kein gueltiger Monat (erwartet YYYY-MM).`);
   }
   return monat;
+}
+
+/** Inhaltstyp anhand der Signatur der ersten Bytes. */
+function erkenneInhaltstyp(daten: Buffer): string {
+  const kopf = daten.subarray(0, 8).toString('latin1');
+  if (kopf.startsWith('%PDF-')) return 'application/pdf';
+  if (daten[0] === 0xff && daten[1] === 0xd8) return 'image/jpeg';
+  if (kopf.startsWith('\x89PNG')) return 'image/png';
+  if (kopf.startsWith('GIF8')) return 'image/gif';
+  if (kopf.startsWith('RIFF') && daten.subarray(8, 12).toString('latin1') === 'WEBP') {
+    return 'image/webp';
+  }
+  return 'application/octet-stream';
 }
 
 function naechsterMonat(monat: string): string {
@@ -52,7 +71,10 @@ export async function registriereRouten(
   // Faehigkeiten - das Frontend blendet danach seine Schaltflaechen ein/aus
   // -------------------------------------------------------------------------
 
-  app.get('/api/capabilities', async (): Promise<Capabilities> => ({
+  app.get('/api/capabilities', async (req): Promise<Capabilities> => ({
+    angemeldet: true,
+    anmeldungNoetig: !ctx.authDeaktiviert,
+    benutzer: req.benutzer,
     ki: Boolean(ctx.ki),
     kiModell: ctx.ki ? ctx.kiModell : undefined,
     n8nRechnungsabruf: ctx.n8nAktiv,
@@ -79,6 +101,58 @@ export async function registriereRouten(
     const monat = pruefeMonat(req.params.monat);
     return ctx.monate.synchronisiere(monat);
   });
+
+  /**
+   * Derselbe Ladevorgang wie oben, nur als Server-Sent-Events-Strom.
+   *
+   * Der Abruf eines Monats dauert je nach Buchungszahl viele Sekunden. Statt
+   * die Oberflaeche so lange auf eine einzige Antwort warten zu lassen, kommen
+   * hier Zwischenstaende: erst die Phasen, dann die fertige Buchungstabelle,
+   * zuletzt der Monat mit allen Belegen.
+   */
+  app.get<{ Params: { monat: string }; Querystring: { refresh?: string } }>(
+    '/api/months/:monat/stream',
+    async (req, reply) => {
+      const monat = pruefeMonat(req.params.monat);
+
+      // Fastify aus der Antwort nehmen - ab hier schreiben wir selbst.
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        // Reverse-Proxies (Traefik/nginx) puffern Antworten sonst und der
+        // Fortschritt kaeme erst am Ende - also gar nicht.
+        'X-Accel-Buffering': 'no',
+      });
+
+      let offen = true;
+      req.raw.on('close', () => {
+        offen = false;
+      });
+
+      const sende = (ereignis: LadeEreignis): void => {
+        if (!offen) return;
+        reply.raw.write(`data: ${JSON.stringify(ereignis)}\n\n`);
+      };
+
+      sende({ art: 'fortschritt', fortschritt: { phase: 'start', text: 'Verbunden' } });
+
+      try {
+        const ergebnis = await ctx.monate.lade(monat, req.query.refresh === 'true', {
+          fortschritt: (fortschritt) => sende({ art: 'fortschritt', fortschritt }),
+          zwischenstand: (teil) => sende({ art: 'teil', monat: teil }),
+        });
+        sende({ art: 'fertig', monat: ergebnis });
+      } catch (err) {
+        const meldung = err instanceof Error ? err.message : String(err);
+        req.log.error({ err: meldung, monat }, 'Lade-Stream fehlgeschlagen');
+        sende({ art: 'fehler', fehler: meldung });
+      } finally {
+        if (offen) reply.raw.end();
+      }
+    },
+  );
 
   /**
    * Kompakter Zustand ohne sevDesk-Abruf. Beantwortet die Frage "ist der Monat
@@ -129,11 +203,15 @@ export async function registriereRouten(
     async (req, reply) => {
       const monat = pruefeMonat(req.params.monat);
       const daten = await ctx.ablage.lese(monat, req.params.dateiId);
-      const istPdf = req.params.dateiId.endsWith('.pdf');
+
+      // Typ aus dem Inhalt bestimmen, nicht aus der Endung: sevDesk liefert
+      // Dateinamen nicht immer mit passender Endung, und ein falsch
+      // deklariertes PDF zeigt der Browser gar nicht erst an.
       return reply
-        .header('Content-Type', istPdf ? 'application/pdf' : 'application/octet-stream')
-        // inline, damit der PDF-Viewer im Frontend direkt rendern kann
+        .header('Content-Type', erkenneInhaltstyp(daten))
+        // inline, damit der Viewer im Frontend direkt rendern kann
         .header('Content-Disposition', `inline; filename="${req.params.dateiId}"`)
+        .header('X-Content-Type-Options', 'nosniff')
         .send(daten);
     },
   );

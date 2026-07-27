@@ -3,10 +3,14 @@ import { SevDeskClient, SevDeskFehler } from './client.js';
 import type { CheckAccountTransaction } from './types.js';
 
 function antwort(objects: unknown) {
+  const koerper = Buffer.from(JSON.stringify({ objects }), 'utf8');
   return {
     ok: true,
     status: 200,
+    headers: { get: (k: string) => (k.toLowerCase() === 'content-type' ? 'application/json' : null) },
     json: async () => ({ objects }),
+    arrayBuffer: async () =>
+      koerper.buffer.slice(koerper.byteOffset, koerper.byteOffset + koerper.byteLength),
   } as unknown as Response;
 }
 
@@ -14,7 +18,9 @@ function fehlerAntwort(status: number) {
   return {
     ok: false,
     status,
+    headers: { get: () => null },
     text: async () => 'Fehlermeldung',
+    arrayBuffer: async () => new ArrayBuffer(0),
   } as unknown as Response;
 }
 
