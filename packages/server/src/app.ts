@@ -139,6 +139,7 @@ export async function baueApp(config: Config): Promise<AppInstanz> {
   const sevdesk = new SevDeskClient({
     token: config.sevdesk.token,
     baseUrl: config.sevdesk.baseUrl,
+    log: app.log,
   });
 
   const checkAccount = await sevdesk.ermittleCheckAccount(config.sevdesk.checkAccountId);

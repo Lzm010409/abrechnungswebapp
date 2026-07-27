@@ -124,6 +124,79 @@ describe('Belegdatei - base64 ohne Huelle', () => {
   });
 });
 
+describe('Belegdatei - unerwartete JSON-Formen', () => {
+  /*
+   * Regression: nach der Umstellung auf inhaltsgetriebene Auswertung kamen
+   * gar keine Ausgabenbelege mehr an. Ursache war die Annahme, der Inhalt
+   * stehe unter objects.content - sevDesk verschachtelt die Datei-Antworten
+   * je nach Endpunkt anders. Feldnamen fest zu verdrahten war der Fehler;
+   * gesucht wird jetzt im gesamten Antwortbaum.
+   */
+
+  const base64 = PDF.toString('base64');
+
+  const formen: Array<[string, unknown]> = [
+    ['objects als Array', { objects: [{ content: base64, filename: 'a.pdf' }] }],
+    ['objects als Array von Strings', { objects: [base64] }],
+    ['ohne objects-Huelle', { content: base64, filename: 'a.pdf' }],
+    ['zusaetzlich verschachtelt', { objects: { document: { content: base64 } } }],
+    ['Inhalt unter "file"', { objects: { file: base64 } }],
+    ['Inhalt tief im Baum', { objects: { a: { b: { c: { content: base64 } } } } }],
+    ['als data-URL', { objects: { content: `data:application/pdf;base64,${base64}` } }],
+  ];
+
+  for (const [name, koerper] of formen) {
+    it(`findet den Beleg: ${name}`, async () => {
+      const fetchImpl = vi.fn(async () => jsonAntwort(koerper));
+
+      const datei = await baueClient(fetchImpl as unknown as typeof fetch)
+        .holeVoucherDatei('v-1');
+
+      expect(datei, name).not.toBeNull();
+      expect(datei!.daten.subarray(0, 5).toString(), name).toBe('%PDF-');
+      expect(datei!.mimeType, name).toBe('application/pdf');
+    });
+  }
+
+  it('uebernimmt den Dateinamen aus der Naehe des Inhalts', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonAntwort({ objects: [{ content: base64, filename: 'Telekom_4711.pdf' }] }),
+    );
+
+    const datei = await baueClient(fetchImpl as unknown as typeof fetch)
+      .holeVoucherDatei('v-1');
+
+    expect(datei!.dateiname).toBe('Telekom_4711.pdf');
+  });
+
+  it('meldet eine unbekannte Antwortform, statt sie zu verschweigen', async () => {
+    // Sonst faellt eine geaenderte API erst auf, wenn ein ganzer Monat leer ist.
+    const warnungen: unknown[] = [];
+    const fetchImpl = vi.fn(async () => jsonAntwort({ objects: { status: 'leer' } }));
+
+    const client = new SevDeskClient({
+      token: 't',
+      baseUrl: 'https://my.sevdesk.de/api/v1',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      maxRetries: 0,
+      log: { warn: (o) => warnungen.push(o) },
+    });
+
+    expect(await client.holeVoucherDatei('v-1')).toBeNull();
+    expect(warnungen).toHaveLength(1);
+    // Die Struktur wird gemeldet, nicht der Inhalt - der kann der Beleg sein.
+    expect(JSON.stringify(warnungen[0])).toContain('status');
+    expect(JSON.stringify(warnungen[0])).not.toContain('leer');
+  });
+
+  it('bleibt bei einem leeren Beleg bei null', async () => {
+    const fetchImpl = vi.fn(async () => jsonAntwort({ objects: null }));
+    expect(
+      await baueClient(fetchImpl as unknown as typeof fetch).holeVoucherDatei('v-1'),
+    ).toBeNull();
+  });
+});
+
 describe('Belegdatei - JSON-Huelle', () => {
   it('liest den Inhalt auch unter abweichendem Feldnamen', async () => {
     for (const feld of ['content', 'base64', 'file', 'data']) {

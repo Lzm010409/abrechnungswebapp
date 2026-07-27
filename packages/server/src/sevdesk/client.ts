@@ -26,6 +26,8 @@ export interface SevDeskClientOptionen {
   /** Maximale Wiederholungen bei 429/5xx. */
   maxRetries?: number;
   fetchImpl?: typeof fetch;
+  /** Optional - meldet unerwartete Antwortformen der Datei-Endpunkte. */
+  log?: { warn: (o: unknown, m?: string) => void };
 }
 
 /**
@@ -39,12 +41,14 @@ export class SevDeskClient {
   private readonly baseUrl: string;
   private readonly maxRetries: number;
   private readonly doFetch: typeof fetch;
+  private readonly log?: SevDeskClientOptionen['log'];
 
   constructor(opts: SevDeskClientOptionen) {
     this.token = opts.token;
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
     this.maxRetries = opts.maxRetries ?? 3;
     this.doFetch = opts.fetchImpl ?? fetch;
+    this.log = opts.log;
   }
 
   private async request<T>(
@@ -388,7 +392,7 @@ export class SevDeskClient {
    * unter objects.content ab oder gibt objects direkt als Base64-String zurueck.
    */
   private leseJsonDatei(rohdaten: Buffer, standardName: string): Datei | null {
-    let geparst: SevDeskAntwort<DokumentBild | RechnungsPdf | string | null>;
+    let geparst: unknown;
     try {
       geparst = JSON.parse(rohdaten.toString('utf8'));
     } catch {
@@ -400,29 +404,24 @@ export class SevDeskClient {
       };
     }
 
-    const obj = geparst.objects;
-    if (!obj) return null;
-
-    if (typeof obj === 'string') {
-      const daten = inhaltZuBuffer(obj);
-      return {
-        daten,
-        dateiname: standardName,
-        mimeType: erkenneSignatur(daten) ?? 'application/pdf',
-      };
+    const fund = sucheDateiInhalt(geparst);
+    if (!fund) {
+      // Kein leeres Ergebnis stillschweigend hinnehmen: ohne diese Meldung
+      // faellt eine geaenderte Antwortform erst auf, wenn ein ganzer Monat
+      // ohne Belege dasteht.
+      this.log?.warn(
+        { struktur: beschreibeStruktur(geparst) },
+        'sevDesk lieferte eine Dateiantwort ohne erkennbaren Inhalt',
+      );
+      return null;
     }
 
-    // Der Inhalt steckt je nach Endpunkt unter unterschiedlichen Namen.
-    const inhalt = obj.content ?? obj.base64 ?? obj.file ?? obj.data;
-    if (typeof inhalt !== 'string' || inhalt.length === 0) return null;
-
-    const daten = inhaltZuBuffer(inhalt, obj.base64encoded);
     return {
-      daten,
-      dateiname: obj.filename ?? standardName,
+      daten: fund.daten,
+      dateiname: fund.dateiname ?? standardName,
       // Die Signatur schlaegt die Angabe: sevDesk hat PDFs schon als
       // "image/..." ausgewiesen, was die Anzeige im Browser gekostet hat.
-      mimeType: erkenneSignatur(daten) ?? obj.mimeType ?? 'application/pdf',
+      mimeType: erkenneSignatur(fund.daten) ?? fund.mimeType ?? 'application/pdf',
     };
   }
 
@@ -475,6 +474,108 @@ export function erkenneSignatur(daten: Buffer): string | undefined {
     return 'image/webp';
   }
   return undefined;
+}
+
+interface DateiFund {
+  daten: Buffer;
+  dateiname?: string;
+  mimeType?: string;
+}
+
+/** Felder, unter denen ein Dateiinhalt stehen kann. */
+const INHALTSFELDER = ['content', 'base64', 'file', 'data', 'document', 'pdf'];
+const NAMENSFELDER = ['filename', 'fileName', 'name', 'originalFilename'];
+const TYPFELDER = ['mimeType', 'mimetype', 'contentType', 'type'];
+
+/**
+ * Sucht den Dateiinhalt irgendwo in der geparsten Antwort.
+ *
+ * Feldnamen fest zu verdrahten hat sich als Fehler erwiesen: sevDesk benennt
+ * und verschachtelt die Datei-Antworten je nach Endpunkt unterschiedlich, und
+ * eine Form, die hier nicht vorgesehen war, hat den kompletten Belegabruf
+ * ausfallen lassen. Entschieden wird deshalb am Inhalt - gesucht wird die
+ * erste Zeichenkette, aus der sich eine Datei mit bekannter Signatur ergibt.
+ */
+function sucheDateiInhalt(wert: unknown, tiefe = 0): DateiFund | undefined {
+  if (tiefe > 6 || wert === null || wert === undefined) return undefined;
+
+  if (typeof wert === 'string') {
+    const daten = zuDatei(wert);
+    return daten ? { daten } : undefined;
+  }
+
+  if (Array.isArray(wert)) {
+    for (const eintrag of wert) {
+      const fund = sucheDateiInhalt(eintrag, tiefe + 1);
+      if (fund) return fund;
+    }
+    return undefined;
+  }
+
+  if (typeof wert !== 'object') return undefined;
+  const objekt = wert as Record<string, unknown>;
+
+  const dateiname = ersterString(objekt, NAMENSFELDER);
+  const mimeType = ersterString(objekt, TYPFELDER);
+
+  // Erst die naheliegenden Felder - sie tragen den passenden Namen daneben.
+  for (const feld of INHALTSFELDER) {
+    const inhalt = objekt[feld];
+    if (typeof inhalt !== 'string' || inhalt.length === 0) continue;
+
+    const daten = zuDatei(inhalt) ?? inhaltZuBuffer(inhalt, objekt.base64encoded as never);
+    if (daten.byteLength > 0) return { daten, dateiname, mimeType };
+  }
+
+  // Danach der Rest der Struktur.
+  for (const inhalt of Object.values(objekt)) {
+    const fund = sucheDateiInhalt(inhalt, tiefe + 1);
+    if (fund) return { dateiname, mimeType, ...fund };
+  }
+
+  return undefined;
+}
+
+/** Zeichenkette -> Datei, aber nur bei erkennbarer Signatur. */
+function zuDatei(inhalt: string): Buffer | undefined {
+  if (inhalt.length < 8) return undefined;
+
+  const roh = Buffer.from(inhalt, 'latin1');
+  if (erkenneSignatur(roh)) return roh;
+
+  return dekodiereBase64(roh);
+}
+
+function ersterString(
+  objekt: Record<string, unknown>,
+  felder: string[],
+): string | undefined {
+  for (const feld of felder) {
+    const wert = objekt[feld];
+    if (typeof wert === 'string' && wert.length > 0) return wert;
+  }
+  return undefined;
+}
+
+/**
+ * Beschreibt den Aufbau einer Antwort fuer das Log - nur Feldnamen und Typen,
+ * keine Werte. Die Antwort kann den Beleg selbst enthalten.
+ */
+function beschreibeStruktur(wert: unknown, tiefe = 0): unknown {
+  if (tiefe > 3) return '...';
+  if (Array.isArray(wert)) {
+    return wert.length === 0 ? [] : [beschreibeStruktur(wert[0], tiefe + 1)];
+  }
+  if (wert === null) return null;
+  if (typeof wert !== 'object') {
+    return typeof wert === 'string' ? `string(${wert.length})` : typeof wert;
+  }
+  return Object.fromEntries(
+    Object.entries(wert as Record<string, unknown>).map(([k, v]) => [
+      k,
+      beschreibeStruktur(v, tiefe + 1),
+    ]),
+  );
 }
 
 /**
