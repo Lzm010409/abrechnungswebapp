@@ -1360,16 +1360,39 @@ describe('End-to-End: gesamte Programmkette', () => {
 
     beforeEach(async () => {
       anfragen = 0;
+      // Ereignisstrom statt einer einzelnen JSON-Antwort: der KI-Dienst fragt
+      // per Strom an, weil das SDK bei den noetigen Token-Budgets gewoehnliche
+      // Anfragen ablehnt.
       claude = createServer((_req, res) => {
         anfragen++;
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        const sende = (typ: string, daten: unknown) =>
+          res.write(`event: ${typ}\ndata: ${JSON.stringify(daten)}\n\n`);
+
+        sende('message_start', {
+          type: 'message_start',
+          message: {
             id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-opus-5',
-            content: [{ type: 'text', text: '{"betrag":119,"aussteller":"Telekom"}' }],
-            stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 },
-          }),
-        );
+            content: [], stop_reason: null, stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 0 },
+          },
+        });
+        sende('content_block_start', {
+          type: 'content_block_start', index: 0,
+          content_block: { type: 'text', text: '' },
+        });
+        sende('content_block_delta', {
+          type: 'content_block_delta', index: 0,
+          delta: { type: 'text_delta', text: '{"betrag":119,"aussteller":"Telekom"}' },
+        });
+        sende('content_block_stop', { type: 'content_block_stop', index: 0 });
+        sende('message_delta', {
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn', stop_sequence: null },
+          usage: { output_tokens: 1 },
+        });
+        sende('message_stop', { type: 'message_stop' });
+        res.end();
       });
       await new Promise<void>((f) => claude.listen(0, '127.0.0.1', f));
       claudeUrl = `http://127.0.0.1:${(claude.address() as AddressInfo).port}`;

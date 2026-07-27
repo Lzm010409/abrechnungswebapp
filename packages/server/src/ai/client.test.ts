@@ -26,6 +26,62 @@ let anfragen: AufgezeichneteAnfrage[];
 let antwortText: string;
 let basisUrl: string;
 
+/**
+ * Antwortet als Ereignisstrom.
+ *
+ * Der Dienst fragt bewusst per Strom an - bei den noetigen Token-Budgets
+ * lehnt das SDK eine gewoehnliche Anfrage rundheraus ab. Der Nachbau muss
+ * deshalb dieselbe Ereignisfolge liefern wie die echte API.
+ *
+ * `text` leer bedeutet: gar kein Inhaltsblock, wie bei einer Ablehnung.
+ */
+function sendeStrom(
+  res: import('node:http').ServerResponse,
+  text: string | null,
+  stopReason: string,
+): void {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+
+  const sende = (typ: string, daten: unknown) =>
+    res.write(`event: ${typ}\ndata: ${JSON.stringify(daten)}\n\n`);
+
+  sende('message_start', {
+    type: 'message_start',
+    message: {
+      id: 'msg_test',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-opus-5',
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 0 },
+    },
+  });
+
+  if (text !== null) {
+    sende('content_block_start', {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'text', text: '' },
+    });
+    sende('content_block_delta', {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text },
+    });
+    sende('content_block_stop', { type: 'content_block_stop', index: 0 });
+  }
+
+  sende('message_delta', {
+    type: 'message_delta',
+    delta: { stop_reason: stopReason, stop_sequence: null },
+    usage: { output_tokens: 10 },
+  });
+  sende('message_stop', { type: 'message_stop' });
+  res.end();
+}
+
 beforeEach(async () => {
   anfragen = [];
   antwortText = '{}';
@@ -39,18 +95,7 @@ beforeEach(async () => {
         koerper: JSON.parse(roh || '{}'),
         headers: req.headers,
       });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          id: 'msg_test',
-          type: 'message',
-          role: 'assistant',
-          model: 'claude-opus-5',
-          content: [{ type: 'text', text: antwortText }],
-          stop_reason: 'end_turn',
-          usage: { input_tokens: 10, output_tokens: 10 },
-        }),
-      );
+      sendeStrom(res, antwortText, 'end_turn');
     });
   });
 
@@ -162,6 +207,18 @@ describe('Aufbau der Anfragen', () => {
     expect(Buffer.from(dok.source.data, 'base64').equals(pdf)).toBe(true);
   });
 
+  it('laesst dem Denken genug Platz und fragt als Strom an', async () => {
+    // max_tokens deckt Denken UND Antwort ab. Zu knapp bemessen kam die
+    // Monatspruefung mit stop_reason "max_tokens" zurueck, statt zu antworten.
+    antwortText = JSON.stringify({ zusammenfassung: 'ok', auffaelligkeiten: [] });
+    await dienst().pruefeMonat('2026-06', [position({ id: 'a' })]);
+
+    const k = anfragen[0]!.koerper;
+    expect(k.max_tokens as number).toBeGreaterThanOrEqual(32_000);
+    // Ohne Strom lehnt das SDK diese Budgets von sich aus ab.
+    expect(k.stream).toBe(true);
+  });
+
   it('verwendet das konfigurierte Modell', async () => {
     antwortText = JSON.stringify({
       betrag: null, belegdatum: null, aussteller: null, ustBetrag: null,
@@ -194,16 +251,7 @@ describe('Auswertung der Antworten', () => {
 
   it('meldet eine Ablehnung als verstaendlichen Fehler', async () => {
     server.removeAllListeners('request');
-    server.on('request', (_req, res) => {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          id: 'msg_x', type: 'message', role: 'assistant', model: 'claude-opus-5',
-          content: [], stop_reason: 'refusal',
-          usage: { input_tokens: 1, output_tokens: 0 },
-        }),
-      );
-    });
+    server.on('request', (_req, res) => sendeStrom(res, null, 'refusal'));
 
     await expect(
       dienst().extrahiereBeleg(await testPdf(), 'beleg.pdf'),
@@ -212,17 +260,7 @@ describe('Auswertung der Antworten', () => {
 
   it('meldet eine abgeschnittene Antwort, statt kaputtes JSON zu parsen', async () => {
     server.removeAllListeners('request');
-    server.on('request', (_req, res) => {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          id: 'msg_x', type: 'message', role: 'assistant', model: 'claude-opus-5',
-          content: [{ type: 'text', text: '{"betrag": 1' }],
-          stop_reason: 'max_tokens',
-          usage: { input_tokens: 1, output_tokens: 1 },
-        }),
-      );
-    });
+    server.on('request', (_req, res) => sendeStrom(res, '{"betrag": 1', 'max_tokens'));
 
     await expect(
       dienst().extrahiereBeleg(await testPdf(), 'beleg.pdf'),

@@ -131,7 +131,7 @@ export function PositionenTabelle({
                     {MARKEN_TEXT[p.markierung]}
                   </span>
                 )}
-                {p.ablageordner && p.dateien.length > 0 && (
+                {p.ablageordner && p.typ === 'AUSGANG' && p.dateien.length > 0 && (
                   <span
                     className="marke ablageordner"
                     title={`Beleg wird nach ${p.ablageordner} abgelegt – von Hand gesetzt`}

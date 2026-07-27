@@ -2,6 +2,7 @@ import type {
   AblageEintrag,
   AblageErgebnis,
   Ablageordner,
+  BelegDatei,
   Monat,
   Position,
 } from '@abrechnung/shared';
@@ -20,6 +21,23 @@ import { bestimmeOrdner, istTankbeleg } from './kategorie.js';
  * jemand die Ordner in Ordnung bringen muss, wenn es daneben ging.
  */
 
+/**
+ * Standardwerte der Drosselung.
+ *
+ * Eine Datei nach der anderen, dazwischen eine kurze Pause: n8n verarbeitet
+ * jede Ablage einzeln und laedt sie zu OneDrive hoch. Ein Monat mit sechzig
+ * Belegen in einem Schwall waere fuer eine kleine n8n-Instanz genug, um in die
+ * Warteschlange zu laufen oder umzukippen. Die Pause kostet bei sechzig Belegen
+ * etwa zwanzig Sekunden - das ist der Preis dafuer, dass der Lauf durchlaeuft.
+ */
+const PAUSE_MS = 350;
+const VERSUCHE = 4;
+/** Erste Wartezeit nach einem abgewiesenen Aufruf, danach jeweils doppelt. */
+const RUECKZUG_MS = 1_000;
+
+/** Antworten, bei denen ein zweiter Versuch sinnvoll ist. */
+const NOCHMAL = new Set([429, 500, 502, 503, 504]);
+
 export interface AblageOptionen {
   /** Webhook, der zu Jahr und Monat die Ordner-ID liefert. */
   ordnerUrl?: string;
@@ -28,6 +46,12 @@ export interface AblageOptionen {
   authHeader?: string;
   authValue?: string;
   fetchImpl?: typeof fetch;
+  /** Pause zwischen zwei Dateien in Millisekunden. 0 schaltet sie ab. */
+  pauseMs?: number;
+  /** Versuche je Aufruf, einschliesslich des ersten. */
+  versuche?: number;
+  /** Wartezeit ersetzbar, damit Tests nicht wirklich warten muessen. */
+  schlafImpl?: (ms: number) => Promise<void>;
 }
 
 export interface AblageAbhaengigkeiten {
@@ -37,12 +61,19 @@ export interface AblageAbhaengigkeiten {
 
 export class OneDriveAblage {
   private readonly doFetch: typeof fetch;
+  private readonly schlaf: (ms: number) => Promise<void>;
+  private readonly pauseMs: number;
+  private readonly versuche: number;
 
   constructor(
     private readonly opts: AblageOptionen,
     private readonly deps: AblageAbhaengigkeiten,
   ) {
     this.doFetch = opts.fetchImpl ?? fetch;
+    this.schlaf =
+      opts.schlafImpl ?? ((ms) => new Promise<void>((fertig) => setTimeout(fertig, ms)));
+    this.pauseMs = opts.pauseMs ?? PAUSE_MS;
+    this.versuche = Math.max(1, opts.versuche ?? VERSUCHE);
   }
 
   /** true, wenn tatsaechlich abgelegt werden kann - sonst gibt es nur Vorschau. */
@@ -57,8 +88,13 @@ export class OneDriveAblage {
    */
   async lege(monat: Monat, nurVorschau = false): Promise<AblageErgebnis> {
     const einteilung = await this.teileEin(monat);
+    // Nur die Ausgaben zaehlen: von den Eingaengen sollte hier ohnehin nichts
+    // landen, sie als "ohne Beleg" zu melden waere irrefuehrend.
     const ohneBeleg = monat.positionen.filter(
-      (p) => p.status !== 'ignoriert' && p.dateien.length === 0,
+      (p) =>
+        p.status !== 'ignoriert' &&
+        istAusgabe(p) &&
+        !p.dateien.some(istAusgabenbeleg),
     ).length;
 
     if (nurVorschau || !this.einsatzbereit) {
@@ -86,7 +122,10 @@ export class OneDriveAblage {
     }
 
     const erledigt: AblageEintrag[] = [];
-    for (const eintrag of einteilung) {
+    for (const [i, eintrag] of einteilung.entries()) {
+      // Vor jeder Datei ausser der ersten kurz Luft holen.
+      if (i > 0 && this.pauseMs > 0) await this.schlaf(this.pauseMs);
+
       try {
         const daten = await this.deps.ladeDatei(eintrag.dateiId);
         await this.legeDateiAb(ordnerId, eintrag.ordner, eintrag.dateiname, daten);
@@ -127,7 +166,10 @@ export class OneDriveAblage {
    */
   private async teileEin(monat: Monat): Promise<AblageEintrag[]> {
     const relevant = monat.positionen.filter(
-      (p) => p.status !== 'ignoriert' && p.dateien.length > 0,
+      (p) =>
+        p.status !== 'ignoriert' &&
+        istAusgabe(p) &&
+        p.dateien.some(istAusgabenbeleg),
     );
 
     const aufAuszug = await this.ermittleAuszugsBuchungen(monat, relevant);
@@ -140,7 +182,7 @@ export class OneDriveAblage {
       const vonHand = position.ablageordner !== undefined;
       const ordner = position.ablageordner ?? bestimmeOrdner(position, treffer);
 
-      for (const datei of position.dateien) {
+      for (const datei of position.dateien.filter(istAusgabenbeleg)) {
         eintraege.push({
           positionId: position.id,
           dateiId: datei.id,
@@ -200,33 +242,105 @@ export class OneDriveAblage {
     });
   }
 
+  /**
+   * Ein Aufruf an n8n, mit Wiederholung bei Ueberlast.
+   *
+   * Wiederholt wird nur, was voruebergehend sein kann: 429 und die
+   * 5xx-Antworten, dazu Verbindungsfehler. Ein 400 oder 404 kommt beim zweiten
+   * Versuch genauso zurueck - das waere nur zusaetzliche Last.
+   *
+   * Bittet n8n per `Retry-After` um eine bestimmte Wartezeit, gilt die; sonst
+   * wird die Wartezeit von Versuch zu Versuch verdoppelt.
+   */
   private async rufe(url: string, koerper: unknown): Promise<unknown> {
     const kopf: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.opts.authHeader && this.opts.authValue) {
       kopf[this.opts.authHeader] = this.opts.authValue;
     }
+    const rumpf = JSON.stringify(koerper);
 
-    const res = await this.doFetch(url, {
-      method: 'POST',
-      headers: kopf,
-      body: JSON.stringify(koerper),
-    });
+    let letzter = new Error('n8n wurde nicht aufgerufen');
 
-    if (!res.ok) {
+    for (let versuch = 1; versuch <= this.versuche; versuch++) {
+      let res: Response;
+      try {
+        res = await this.doFetch(url, { method: 'POST', headers: kopf, body: rumpf });
+      } catch (err) {
+        // Verbindungsfehler: kann die Instanz sein, die gerade neu startet.
+        letzter = new Error(
+          `n8n nicht erreichbar: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        if (await this.wartetNochmal(versuch)) continue;
+        throw letzter;
+      }
+
+      if (res.ok) {
+        const text = await res.text();
+        try {
+          return JSON.parse(text);
+        } catch {
+          return text;
+        }
+      }
+
       const text = await res.text().catch(() => '');
-      throw new Error(`n8n antwortete mit ${res.status}: ${text.slice(0, 200)}`);
+      letzter = new Error(`n8n antwortete mit ${res.status}: ${text.slice(0, 200)}`);
+      if (!NOCHMAL.has(res.status)) throw letzter;
+
+      const gewuenscht = leseRetryAfter(res.headers?.get?.('retry-after') ?? null);
+      if (await this.wartetNochmal(versuch, gewuenscht)) continue;
+      throw letzter;
     }
 
-    const text = await res.text();
-    try {
-      return JSON.parse(text);
-    } catch {
-      return text;
-    }
+    throw letzter;
+  }
+
+  /** Wartet vor dem naechsten Versuch; false, wenn es keinen mehr gibt. */
+  private async wartetNochmal(versuch: number, gewuenschtMs?: number): Promise<boolean> {
+    if (versuch >= this.versuche) return false;
+
+    const ms = gewuenschtMs ?? RUECKZUG_MS * 2 ** (versuch - 1);
+    this.deps.log?.warn({ versuch, wartenMs: ms }, 'n8n ausgelastet, neuer Versuch folgt');
+    await this.schlaf(ms);
+    return true;
   }
 }
 
+/** `Retry-After` kommt als Sekundenzahl oder als Datum. */
+function leseRetryAfter(wert: string | null): number | undefined {
+  if (!wert) return undefined;
+
+  const sekunden = Number(wert);
+  if (Number.isFinite(sekunden)) return Math.max(0, sekunden) * 1000;
+
+  const zeitpunkt = Date.parse(wert);
+  if (Number.isNaN(zeitpunkt)) return undefined;
+  return Math.max(0, zeitpunkt - Date.now());
+}
+
 // ---------------------------------------------------------------------------
+
+/**
+ * Nur Ausgabenbelege werden einsortiert.
+ *
+ * Die Ausgangsrechnungen liegen in OneDrive an ganz anderer Stelle - im
+ * Gutachtenordner des jeweiligen Vorgangs. Sie in die Monatsordner zu kopieren
+ * waere eine zweite, konkurrierende Ablage derselben Datei.
+ */
+function istAusgabe(position: Position): boolean {
+  return position.typ === 'AUSGANG';
+}
+
+/**
+ * Rechnungs-PDFs bleiben auch an einer Ausgabenbuchung aussen vor.
+ *
+ * Beide Quellen sind Ausgangsrechnungen: das Original aus dem Gutachtenordner
+ * und das von sevDesk erzeugte PDF. Bei einer Gutschrift kann so etwas an
+ * einer AUSGANG-Buchung haengen - abgelegt gehoert es trotzdem nicht.
+ */
+function istAusgabenbeleg(datei: BelegDatei): boolean {
+  return datei.quelle !== 'sevdesk-invoice' && datei.quelle !== 'onedrive-n8n';
+}
 
 function begruende(ordner: Ablageordner, aufAuszug: boolean, position: Position): string {
   if (ordner === 'Konto') {

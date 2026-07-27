@@ -92,6 +92,8 @@ ausschließlich für die Arbeit auf dem eigenen Rechner gedacht.
 | `N8N_FIND_RECHNUNG_URL` | nein | Ausgangsrechnungen kommen aus sevDesk statt als Original aus OneDrive |
 | `N8N_ORDNER_URL` | nein | Belegablage bleibt bei der Vorschau, es wird nichts nach OneDrive geschrieben |
 | `N8N_ABLAGE_URL` | nein | dito — beide Adressen müssen gesetzt sein |
+| `N8N_ABLAGE_PAUSE_MS` | nein | 350 ms Pause zwischen zwei Dateien |
+| `N8N_ABLAGE_VERSUCHE` | nein | 4 Versuche je Aufruf bei Überlast |
 | `ANTHROPIC_API_KEY` | nein | KI-Funktionen inaktiv, Rest läuft vollständig |
 | `ENTRA_ERLAUBTE_BENUTZER` | nein | jedes Konto des Tenants darf sich anmelden |
 | `ENTRA_ERLAUBTE_GRUPPEN` | nein | keine Gruppenprüfung |
@@ -204,6 +206,13 @@ nur beim Klick an — es läuft nichts automatisch im Hintergrund. Belege werden
 je Datei-Hash zwischengespeichert, dieselbe Datei geht also nie zweimal an das
 Modell.
 
+Das Token-Budget je Anfrage deckt **Denken und Antwort zusammen** ab und ist
+deshalb großzügig bemessen (32 000 für Monatsprüfung und Zuordnung). Bezahlt
+wird, was tatsächlich anfällt, nicht das Budget. Meldet die Oberfläche
+trotzdem einmal *„Die KI-Antwort war länger als das eingeräumte Budget"*, ist
+ein kleinerer `ANTHROPIC_EFFORT` (z. B. `medium`) das richtige Mittel: das
+Modell denkt dann kürzer und hat mehr Platz für die Antwort.
+
 #### 3. Belegablage in OneDrive — `N8N_ORDNER_URL` / `N8N_ABLAGE_URL`
 
 **Wofür:** die Belege eines Monats in die OneDrive-Monatsordner `Konto`, `Bar`
@@ -237,11 +246,18 @@ POST { "ordnerId": "01ABCDEF…", "unterordner": "Bar",
        "dateiname": "0726_1800TG01.pdf", "inhalt": "<base64>" }
 ```
 
-Scheitert eine einzelne Datei, wird der Fehler an ihr vermerkt und die
-restlichen werden trotzdem abgelegt. Auch hier gilt: sollen die Webhooks nicht
-offen erreichbar sein, in n8n Header-Auth aktivieren und
-`N8N_WEBHOOK_AUTH_HEADER` / `N8N_WEBHOOK_AUTH_VALUE` setzen — sie gelten für
-alle drei Workflows gemeinsam.
+**Gedrosselt, damit n8n nicht umkippt:** die Dateien gehen einzeln und
+nacheinander hinaus, dazwischen liegen 350 ms
+(`N8N_ABLAGE_PAUSE_MS`). Antwortet n8n mit 429 oder einem 5xx, wird der Aufruf
+bis zu viermal wiederholt (`N8N_ABLAGE_VERSUCHE`) — die Wartezeit verdoppelt
+sich dabei von einer Sekunde an, ein mitgeschicktes `Retry-After` hat Vorrang.
+Ein 400 oder 404 wird nicht wiederholt; der käme beim zweiten Mal genauso
+zurück. Scheitert eine einzelne Datei endgültig, wird der Fehler an ihr
+vermerkt und die restlichen werden trotzdem abgelegt.
+
+Auch hier gilt: sollen die Webhooks nicht offen erreichbar sein, in n8n
+Header-Auth aktivieren und `N8N_WEBHOOK_AUTH_HEADER` /
+`N8N_WEBHOOK_AUTH_VALUE` setzen — sie gelten für alle drei Workflows gemeinsam.
 
 Prüfen, ob alles greift:
 
@@ -501,14 +517,22 @@ ohne weitere Einstellung.
 
 ## Belege nach OneDrive einsortieren
 
-Beim Erzeugen des Abrechnungs-PDF werden die Belege den Monatsordnern
-zugeteilt:
+Beim Erzeugen des Abrechnungs-PDF werden die **Ausgabenbelege** den
+Monatsordnern zugeteilt:
 
 | Ordner | Inhalt |
 |---|---|
 | `Konto` | alles, was sich einer Kontoauszugsseite zuordnen ließ |
 | `Tanken` | von den übrigen die Tankbelege |
 | `Bar` | der Rest |
+
+**Nur Ausgaben.** Geldeingänge bleiben außen vor: die zugehörigen
+Ausgangsrechnungen liegen in OneDrive im Gutachtenordner des jeweiligen
+Vorgangs, eine Kopie im Monatsordner wäre eine zweite, konkurrierende Ablage
+derselben Datei. Geprüft wird beides — die Richtung der Buchung und die
+Herkunft der Datei: ein Beleg aus dem Gutachtenordner oder aus einer
+sevDesk-Ausgangsrechnung bleibt auch dann liegen, wenn er an einer
+AUSGANG-Buchung hängt (etwa bei einer Gutschrift).
 
 Die Reihenfolge der Regeln ist nicht beliebig: eine mit Karte bezahlte
 Tankfüllung steht auf dem Kontoauszug und gehört nach `Konto`. `Tanken` meint

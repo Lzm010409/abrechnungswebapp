@@ -1,7 +1,7 @@
 import { PDFDocument, StandardFonts } from 'pdf-lib';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Monat, Position } from '@abrechnung/shared';
-import { OneDriveAblage, sucheOrdnerId } from './ablage.js';
+import { OneDriveAblage, sucheOrdnerId, type AblageOptionen } from './ablage.js';
 
 /**
  * Die Belege wandern am Ende in die OneDrive-Monatsordner Konto, Bar und
@@ -148,6 +148,56 @@ describe('Einteilung auf die Ordner', () => {
     expect(ergebnis.eintraege[0]!.vonHand).toBeUndefined();
   });
 
+  it('laesst Geldeingaenge aussen vor - Rechnungen liegen woanders', async () => {
+    const ablage = new OneDriveAblage({}, { ladeDatei: async () => Buffer.alloc(0) });
+
+    const ergebnis = await ablage.lege(
+      monat({
+        positionen: [
+          pos({ id: 'ausgabe', typ: 'AUSGANG', betrag: -100 }),
+          pos({ id: 'eingang', typ: 'EINGANG', betrag: 892.5 }),
+        ],
+      }),
+    );
+
+    expect(ergebnis.eintraege.map((e) => e.positionId)).toEqual(['ausgabe']);
+    // Ein Eingang ohne Beleg ist fuer die Ablage kein fehlender Beleg.
+    expect(ergebnis.ohneBeleg).toBe(0);
+  });
+
+  it('laesst ein Rechnungs-PDF auch an einer Ausgabenbuchung liegen', async () => {
+    const ablage = new OneDriveAblage({}, { ladeDatei: async () => Buffer.alloc(0) });
+
+    const ergebnis = await ablage.lege(
+      monat({
+        positionen: [
+          pos({
+            id: 'gutschrift',
+            typ: 'AUSGANG',
+            dateien: [
+              {
+                id: 'r1',
+                dateiname: 'Rechnung.pdf',
+                groesse: 1,
+                mimeType: 'application/pdf',
+                quelle: 'onedrive-n8n',
+              },
+              {
+                id: 'q1',
+                dateiname: 'Quittung.pdf',
+                groesse: 1,
+                mimeType: 'application/pdf',
+                quelle: 'manuell',
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+
+    expect(ergebnis.eintraege.map((e) => e.dateiname)).toEqual(['Quittung.pdf']);
+  });
+
   it('bleibt ohne konfigurierte Webhooks bei der Vorschau', async () => {
     const ablage = new OneDriveAblage({}, { ladeDatei: async () => Buffer.alloc(0) });
     const ergebnis = await ablage.lege(monat({ positionen: [pos({ id: 'a' })] }));
@@ -159,12 +209,24 @@ describe('Einteilung auf die Ordner', () => {
 });
 
 describe('Ablegen ueber n8n', () => {
-  const bereit = (fetchImpl: typeof fetch) =>
+  /** Gewartete Zeiten je Instanz - so laesst sich die Drosselung pruefen. */
+  let gewartet: number[] = [];
+
+  beforeEach(() => {
+    gewartet = [];
+  });
+
+  const bereit = (fetchImpl: typeof fetch, opts: Partial<AblageOptionen> = {}) =>
     new OneDriveAblage(
       {
         ordnerUrl: 'https://n8n.example/ordner',
         ablageUrl: 'https://n8n.example/ablage',
         fetchImpl,
+        // Im Test wird nicht wirklich gewartet, nur mitgeschrieben.
+        schlafImpl: async (ms) => {
+          gewartet.push(ms);
+        },
+        ...opts,
       },
       { ladeDatei: async () => Buffer.from('%PDF-1.4 x') },
     );
@@ -174,6 +236,15 @@ describe('Ablegen ueber n8n', () => {
       ok: true,
       status: 200,
       text: async () => JSON.stringify(koerper),
+    }) as unknown as Response;
+
+  /** Fehlerantwort mit optionalem Retry-After. */
+  const fehler = (status: number, retryAfter?: string) =>
+    ({
+      ok: false,
+      status,
+      text: async () => 'ausgelastet',
+      headers: { get: (name: string) => (name === 'retry-after' ? (retryAfter ?? null) : null) },
     }) as unknown as Response;
 
   it('holt die Ordner-ID und legt jede Datei ab', async () => {
@@ -225,6 +296,71 @@ describe('Ablegen ueber n8n', () => {
 
     expect(ergebnis.eintraege).toHaveLength(2);
     expect(ergebnis.eintraege.every((e) => e.fehler)).toBe(true);
+  });
+
+  it('legt zwischen zwei Dateien eine Pause ein', async () => {
+    const fetchImpl = vi.fn(async (url: string) =>
+      antwort(String(url).endsWith('/ordner') ? { ordnerId: 'X' } : { ok: true }),
+    );
+
+    await bereit(fetchImpl as unknown as typeof fetch, { pauseMs: 250 }).lege(
+      monat({ positionen: [pos({ id: 'a' }), pos({ id: 'b' }), pos({ id: 'c' })] }),
+      false,
+    );
+
+    // Drei Dateien, zwei Pausen - vor der ersten wird nicht gewartet.
+    expect(gewartet).toEqual([250, 250]);
+  });
+
+  it('versucht es nach einem 429 erneut und haelt sich an Retry-After', async () => {
+    let ablagen = 0;
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (String(url).endsWith('/ordner')) return antwort({ ordnerId: 'X' });
+      ablagen++;
+      return ablagen === 1 ? fehler(429, '5') : antwort({ ok: true });
+    });
+
+    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, { pauseMs: 0 }).lege(
+      monat({ positionen: [pos({ id: 'a' })] }),
+      false,
+    );
+
+    expect(ergebnis.eintraege[0]!.fehler).toBeUndefined();
+    expect(ablagen).toBe(2);
+    // Retry-After in Sekunden, umgerechnet in Millisekunden.
+    expect(gewartet).toEqual([5000]);
+  });
+
+  it('gibt bei dauerhafter Ueberlast auf, statt endlos zu wiederholen', async () => {
+    const fetchImpl = vi.fn(async (url: string) =>
+      String(url).endsWith('/ordner') ? antwort({ ordnerId: 'X' }) : fehler(503),
+    );
+
+    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, {
+      pauseMs: 0,
+      versuche: 3,
+    }).lege(monat({ positionen: [pos({ id: 'a' })] }), false);
+
+    expect(ergebnis.eintraege[0]!.fehler).toContain('503');
+    // Ein Ordner-Aufruf plus drei Ablage-Versuche.
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    // Rueckzug verdoppelt sich: 1s, dann 2s.
+    expect(gewartet).toEqual([1000, 2000]);
+  });
+
+  it('wiederholt einen 400 nicht - der faellt beim zweiten Mal genauso aus', async () => {
+    const fetchImpl = vi.fn(async (url: string) =>
+      String(url).endsWith('/ordner') ? antwort({ ordnerId: 'X' }) : fehler(400),
+    );
+
+    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, { pauseMs: 0 }).lege(
+      monat({ positionen: [pos({ id: 'a' })] }),
+      false,
+    );
+
+    expect(ergebnis.eintraege[0]!.fehler).toContain('400');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(gewartet).toEqual([]);
   });
 
   it('meldet einen fehlenden Monatsordner verstaendlich', async () => {

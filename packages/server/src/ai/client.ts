@@ -8,6 +8,26 @@ import type {
 import type { Config } from '../config.js';
 
 /**
+ * Obergrenze fuer Denken UND Antwort zusammen.
+ *
+ * Das ist der Punkt, an dem die Monatspruefung frueher scheiterte: mit
+ * adaptivem Denken auf Stufe "high" ging das Budget im Denken auf, bevor das
+ * JSON geschrieben war - die Antwort kam mit stop_reason "max_tokens" zurueck
+ * und war unbrauchbar. Die Werte sind deshalb grosszuegig; bezahlt wird, was
+ * tatsaechlich anfaellt, nicht das Budget.
+ */
+const BUDGET = {
+  /** Ein Beleg, wenige Felder - aber das Lesen des PDF kostet Denkzeit. */
+  beleg: 16_000,
+  /** Kurze Liste von Kandidaten. */
+  aktenzeichen: 8_000,
+  /** Ganzer Monat als Eingabe, Liste von Vorschlaegen als Ausgabe. */
+  zuordnung: 32_000,
+  /** Ganzer Monat, dazu eine Begruendung je Auffaelligkeit. */
+  pruefung: 32_000,
+} as const;
+
+/**
  * KI-Funktionen der Abrechnung.
  *
  * Der gesamte Dienst ist optional: ist ANTHROPIC_API_KEY nicht gesetzt, wird
@@ -33,15 +53,28 @@ export class KiDienst {
   }
 
   /**
+   * Ein Aufruf ans Modell.
+   *
+   * Als Strom, weil das SDK gewoehnliche Anfragen ab den hier noetigen
+   * Budgets rundheraus ablehnt ("Streaming is required for operations that may
+   * take longer than 10 minutes"). Ausgewertet wird nur die fertige Nachricht -
+   * die Teilstuecke braucht hier niemand.
+   */
+  private async frage(
+    params: Omit<Anthropic.MessageStreamParams, 'model'>,
+  ): Promise<Anthropic.Message> {
+    return this.client.messages.stream({ model: this.modell, ...params }).finalMessage();
+  }
+
+  /**
    * Liest Belegdaten aus einem PDF.
    *
    * Das PDF geht als document-Block direkt an das Modell - kein separates OCR.
    * Ergebnis dient dem Abgleich gegen die Buchung, nicht als Buchungsgrundlage.
    */
   async extrahiereBeleg(pdf: Buffer, dateiname: string): Promise<BelegExtraktion> {
-    const antwort = await this.client.messages.create({
-      model: this.modell,
-      max_tokens: 4000,
+    const antwort = await this.frage({
+      max_tokens: BUDGET.beleg,
       thinking: { type: 'adaptive' },
       output_config: {
         effort: this.effort,
@@ -125,9 +158,8 @@ export class KiDienst {
   ): Promise<ZuordnungsVorschlag[]> {
     if (offeneBuchungen.length === 0 || freieBelege.length === 0) return [];
 
-    const antwort = await this.client.messages.create({
-      model: this.modell,
-      max_tokens: 8000,
+    const antwort = await this.frage({
+      max_tokens: BUDGET.zuordnung,
       thinking: { type: 'adaptive' },
       output_config: {
         effort: this.effort,
@@ -208,9 +240,8 @@ export class KiDienst {
     buchungsdatum: string,
     bereitsVersucht: string[],
   ): Promise<string[]> {
-    const antwort = await this.client.messages.create({
-      model: this.modell,
-      max_tokens: 2000,
+    const antwort = await this.frage({
+      max_tokens: BUDGET.aktenzeichen,
       thinking: { type: 'adaptive' },
       output_config: {
         effort: 'medium',
@@ -257,9 +288,8 @@ export class KiDienst {
 
   /** Prueft den fertigen Monat auf Auffaelligkeiten. */
   async pruefeMonat(monat: string, positionen: Position[]): Promise<MonatsReview> {
-    const antwort = await this.client.messages.create({
-      model: this.modell,
-      max_tokens: 8000,
+    const antwort = await this.frage({
+      max_tokens: BUDGET.pruefung,
       thinking: { type: 'adaptive' },
       output_config: {
         effort: this.effort,
@@ -342,7 +372,11 @@ function leseJson<T>(antwort: Anthropic.Message): T {
     throw new Error('Die KI hat die Verarbeitung dieses Belegs abgelehnt.');
   }
   if (antwort.stop_reason === 'max_tokens') {
-    throw new Error('KI-Antwort wurde abgeschnitten (max_tokens erreicht).');
+    throw new Error(
+      'Die KI-Antwort war laenger als das eingeraeumte Budget und wurde ' +
+        'abgeschnitten. Ein kleinerer ANTHROPIC_EFFORT (z. B. "medium") laesst ' +
+        'dem Modell weniger Denkzeit und mehr Platz fuer die Antwort.',
+    );
   }
 
   const text = antwort.content.find((b) => b.type === 'text');

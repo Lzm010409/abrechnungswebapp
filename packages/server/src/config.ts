@@ -8,6 +8,14 @@ function env(name: string): string | undefined {
   return getrimmt.length === 0 ? undefined : getrimmt;
 }
 
+/** Zahl aus der Umgebung; Unsinn wird ignoriert, dann gilt der Standardwert. */
+function zahl(name: string): number | undefined {
+  const wert = env(name);
+  if (wert === undefined) return undefined;
+  const n = Number(wert);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
 function pflicht(name: string): string {
   const wert = env(name);
   if (!wert) {
@@ -46,6 +54,10 @@ export interface Config {
     ablageUrl?: string;
     authHeader?: string;
     authValue?: string;
+    /** Pause zwischen zwei Dateien, damit n8n nicht ueberrannt wird */
+    pauseMs?: number;
+    /** Versuche je Aufruf, einschliesslich des ersten */
+    versuche?: number;
   };
 
   anthropic?: {
@@ -200,6 +212,8 @@ export function ladeConfig(): Config {
             ablageUrl,
             authHeader: env('N8N_WEBHOOK_AUTH_HEADER'),
             authValue: env('N8N_WEBHOOK_AUTH_VALUE'),
+            pauseMs: zahl('N8N_ABLAGE_PAUSE_MS'),
+            versuche: zahl('N8N_ABLAGE_VERSUCHE'),
           }
         : undefined,
 

@@ -237,7 +237,8 @@ export function Detailbereich({
         </div>
       </section>
 
-      {/* -- Zielordner der Belegablage -- */}
+      {/* -- Zielordner der Belegablage; nur Ausgaben werden einsortiert -- */}
+      {position.typ === 'AUSGANG' && (
       <section>
         <h4>Ablageordner</h4>
         <p className="klein grau">
@@ -283,6 +284,7 @@ export function Detailbereich({
           </p>
         )}
       </section>
+      )}
 
       {/* -- Aktenzeichen -- */}
       <section>
