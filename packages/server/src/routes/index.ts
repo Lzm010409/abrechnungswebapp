@@ -5,6 +5,7 @@ import {
   type Capabilities,
   type Kontoauszug,
   type LadeEreignis,
+  type SammelPatch,
 } from '@abrechnung/shared';
 import type { KiDienst } from '../ai/client.js';
 import type { Datenbank } from '../db/index.js';
@@ -179,6 +180,20 @@ export async function registriereRouten(
         monate.push(m);
       }
       return monate.map((m) => ctx.monate.status(m));
+    },
+  );
+
+  /** Dieselbe Aenderung an mehreren Buchungen - eine Runde statt vieler. */
+  app.patch<{ Params: { monat: string }; Body: SammelPatch }>(
+    '/api/months/:monat/positions',
+    async (req) => {
+      const monat = pruefeMonat(req.params.monat);
+      const { positionIds, patch } = req.body ?? {};
+
+      if (!Array.isArray(positionIds) || positionIds.length === 0) {
+        throw new EingabeFehler('Es wurde keine Buchung ausgewaehlt.');
+      }
+      return ctx.monate.patcheMehrere(monat, positionIds, patch ?? {});
     },
   );
 

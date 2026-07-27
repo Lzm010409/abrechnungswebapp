@@ -8,13 +8,34 @@ const AMPEL: Record<PositionsStatus, { zeichen: string; klasse: string; titel: s
   ignoriert: { zeichen: '○', klasse: 'ampel ignoriert', titel: 'Ausgeblendet' },
 };
 
+const MARKEN_TEXT: Record<NonNullable<Position['markierung']>, string> = {
+  privatentnahme: 'privat',
+  dauerbeleg: 'Dauer',
+  umbuchung: 'Umbuchung',
+};
+
+const MARKEN_TITEL: Record<NonNullable<Position['markierung']>, string> = {
+  privatentnahme: 'Privatentnahme – kein Beleg erforderlich',
+  dauerbeleg: 'Dauerbeleg – der Beleg liegt einmalig als Vertrag vor',
+  umbuchung: 'Umbuchung zwischen eigenen Konten – kein Beleg erforderlich',
+};
+
 interface Props {
   positionen: Position[];
   ausgewaehlt?: string;
   onAuswahl: (positionId: string) => void;
+  /** Mehrfachauswahl fuer Sammelaktionen */
+  markiert: Set<string>;
+  onMarkierungAendern: (ids: Set<string>) => void;
 }
 
-export function PositionenTabelle({ positionen, ausgewaehlt, onAuswahl }: Props) {
+export function PositionenTabelle({
+  positionen,
+  ausgewaehlt,
+  onAuswahl,
+  markiert,
+  onMarkierungAendern,
+}: Props) {
   if (positionen.length === 0) {
     return (
       <p className="leer">
@@ -24,10 +45,31 @@ export function PositionenTabelle({ positionen, ausgewaehlt, onAuswahl }: Props)
     );
   }
 
+  const alleMarkiert = positionen.length > 0 && positionen.every((p) => markiert.has(p.id));
+
+  const schalte = (id: string) => {
+    const neu = new Set(markiert);
+    if (neu.has(id)) neu.delete(id);
+    else neu.add(id);
+    onMarkierungAendern(neu);
+  };
+
   return (
     <table className="positionen">
       <thead>
         <tr>
+          <th className="sp-haken">
+            <input
+              type="checkbox"
+              checked={alleMarkiert}
+              title={alleMarkiert ? 'Auswahl aufheben' : 'Alle auswählen'}
+              onChange={() =>
+                onMarkierungAendern(
+                  alleMarkiert ? new Set() : new Set(positionen.map((p) => p.id)),
+                )
+              }
+            />
+          </th>
           <th className="sp-status" />
           <th className="sp-datum">Datum</th>
           <th className="sp-betrag">Betrag</th>
@@ -47,10 +89,21 @@ export function PositionenTabelle({ positionen, ausgewaehlt, onAuswahl }: Props)
               className={[
                 ausgewaehlt === p.id ? 'aktiv' : '',
                 p.status === 'ignoriert' ? 'ausgeblendet' : '',
+                markiert.has(p.id) ? 'markiert' : '',
               ]
                 .filter(Boolean)
                 .join(' ')}
             >
+              <td className="sp-haken">
+                <input
+                  type="checkbox"
+                  checked={markiert.has(p.id)}
+                  // Der Haken darf die Zeilenauswahl nicht mitausloesen - sonst
+                  // springt der Detailbereich bei jedem Anhaken um.
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={() => schalte(p.id)}
+                />
+              </td>
               <td>
                 <span className={ampel.klasse} title={p.hinweis ?? ampel.titel}>
                   {ampel.zeichen}
@@ -72,12 +125,10 @@ export function PositionenTabelle({ positionen, ausgewaehlt, onAuswahl }: Props)
                   <span
                     className={`marke ${p.markierung}`}
                     title={
-                      p.markierung === 'privatentnahme'
-                        ? 'Privatentnahme – kein Beleg erforderlich'
-                        : 'Dauerbeleg – der Beleg liegt einmalig als Vertrag vor'
+                      MARKEN_TITEL[p.markierung]
                     }
                   >
-                    {p.markierung === 'privatentnahme' ? 'privat' : 'Dauer'}
+                    {MARKEN_TEXT[p.markierung]}
                   </span>
                 )}
                 {p.sevdeskStatus === 'offen' && !p.markierung && (
@@ -111,9 +162,7 @@ export function PositionenTabelle({ positionen, ausgewaehlt, onAuswahl }: Props)
 }
 
 function belegKuerzel(p: Position): string {
-  if (p.dateien.length === 0 && p.markierung) {
-    return p.markierung === 'privatentnahme' ? 'privat' : 'Dauerbeleg';
-  }
+  if (p.dateien.length === 0 && p.markierung) return MARKEN_TEXT[p.markierung];
   if (p.dateien.length === 0) {
     // Liegt es an sevDesk, hilft ein Beleg-Upload hier nicht weiter.
     return p.sevdeskStatus === 'offen' ? 'nicht verbucht' : '—';

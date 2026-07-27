@@ -262,12 +262,25 @@ Markierungen im Detailbereich:
 |---|---|
 | **Privatentnahme** | Entnahme fürs Private — gehört in die Abrechnung, hat keinen Beleg |
 | **Dauerbeleg** | Miete, Leasing, Abo — der Beleg liegt einmalig als Vertrag vor |
+| **Umbuchung** | Übertrag zwischen eigenen Konten — dazu gibt es keinen Beleg |
 
-Beide machen die Buchung grün und erledigt. Der Unterschied zum Ausblenden ist
+Alle drei machen die Buchung grün und erledigt. Der Unterschied zum Ausblenden ist
 wichtig: eine markierte Buchung **bleibt** in Journal, Summen und PDF stehen —
 in der Beleg-Spalte steht dann `privat` bzw. `Dauerbeleg`. Eine ausgeblendete
 Buchung fällt dagegen ganz heraus. Nochmal auf dieselbe Markierung klicken
 nimmt sie zurück.
+
+Umbuchungen stecken weiterhin in Einnahmen und Ausgaben: dort stehen die
+Bewegungen des Kontos, und eine Umbuchung ist eine davon. Das Deckblatt weist
+sie separat aus, damit sich der reine Geschäftserfolg herausrechnen lässt.
+
+### Mehrere Buchungen auf einmal
+
+Über die Kästchen links lassen sich beliebig viele Zeilen anhaken (oder alle
+über das Kästchen in der Kopfzeile). Darüber erscheint eine Leiste, die eine
+Entscheidung für alle Angehakten übernimmt: markieren, Markierung entfernen
+oder ausblenden. Das geht in **einem** Aufruf an den Server, nicht in einem pro
+Buchung — bei wiederkehrenden Posten spart das den Großteil der Klickarbeit.
 
 **Manuelle Korrekturen überleben jeden Neuabruf.** „Aus sevDesk laden" holt die
 Buchungen frisch, lässt eingetragene Aktenzeichen, Belegzuordnungen und
@@ -369,7 +382,7 @@ Zweifelsfälle — Beträge, Verknüpfungen und Summen kommen aus sevDesk.
 npm test
 ```
 
-291 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+296 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 

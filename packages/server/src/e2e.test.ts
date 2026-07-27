@@ -454,6 +454,21 @@ describe('End-to-End: gesamte Programmkette', () => {
       expect(status.abgeschlossen).toBe(true);
     });
 
+    it('kennt die Umbuchung als dritte Markierung', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      const monat = (
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/months/${MONAT}/positions/tx-privat`,
+          payload: { markierung: 'umbuchung' },
+        })
+      ).json<Monat>();
+
+      expect(monat.positionen[0]!.status).toBe('ok');
+      expect(monat.positionen[0]!.hinweis).toContain('Umbuchung');
+      expect(monat.summen.anzahlUmbuchungen).toBe(1);
+    });
+
     it('nimmt die Markierung wieder zurueck', async () => {
       await app.inject({ url: `/api/months/${MONAT}` });
       await app.inject({
@@ -472,6 +487,76 @@ describe('End-to-End: gesamte Programmkette', () => {
 
       expect(monat.positionen[0]!.markierung).toBeUndefined();
       expect(monat.positionen[0]!.status).toBe('offen');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('Sammelaenderung an mehreren Buchungen', () => {
+    // Wiederkehrende Posten einzeln zu markieren waere bei einem vollen Monat
+    // viel Klickarbeit - und jede Runde eine eigene Anfrage.
+
+    beforeEach(async () => {
+      const daten = basisDaten();
+      for (const id of ['tx-1', 'tx-2', 'tx-3']) {
+        daten.transaktionen.push(tx({ id, amount: '-50.00', paymtPurpose: id }));
+      }
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp();
+    });
+
+    it('markiert mehrere Buchungen in einem Aufruf', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+
+      const monat = (
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/months/${MONAT}/positions`,
+          payload: { positionIds: ['tx-1', 'tx-3'], patch: { markierung: 'dauerbeleg' } },
+        })
+      ).json<Monat>();
+
+      const nach = (id: string) => monat.positionen.find((p) => p.id === id)!;
+      expect(nach('tx-1').markierung).toBe('dauerbeleg');
+      expect(nach('tx-3').markierung).toBe('dauerbeleg');
+      expect(nach('tx-2').markierung).toBeUndefined();
+      expect(monat.summen.anzahlOhneBelegpflicht).toBe(2);
+    });
+
+    it('blendet mehrere Buchungen auf einmal aus', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+
+      const monat = (
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/months/${MONAT}/positions`,
+          payload: { positionIds: ['tx-1', 'tx-2'], patch: { status: 'ignoriert' } },
+        })
+      ).json<Monat>();
+
+      expect(monat.summen.anzahlIgnoriert).toBe(2);
+      expect(monat.summen.ausgaben).toBe(50);
+    });
+
+    it('weist eine leere Auswahl ab', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/api/months/${MONAT}/positions`,
+        payload: { positionIds: [], patch: { markierung: 'dauerbeleg' } },
+      });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('aendert nichts, wenn eine der Buchungen nicht existiert', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/api/months/${MONAT}/positions`,
+        payload: { positionIds: ['tx-1', 'gibtsnicht'], patch: { markierung: 'umbuchung' } },
+      });
+
+      expect(res.statusCode).toBe(404);
     });
   });
 

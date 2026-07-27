@@ -4,6 +4,7 @@ import type {
   Capabilities,
   LadeFortschritt,
   LadePhase,
+  Markierung,
   Monat,
   MonatsReview,
 } from '@abrechnung/shared';
@@ -21,6 +22,7 @@ import { Detailbereich } from './components/Detailbereich';
 import { Kontoauszuege } from './components/Kontoauszuege';
 import { Ladefortschritt } from './components/Ladefortschritt';
 import { PositionenTabelle } from './components/PositionenTabelle';
+import { Sammelaktionen } from './components/Sammelaktionen';
 
 export function App() {
   const [monat, setMonat] = useState(() => verschiebeMonat(aktuellerMonat(), -1));
@@ -31,6 +33,8 @@ export function App() {
   const [laedt, setLaedt] = useState(false);
   const [phasen, setPhasen] = useState<Map<LadePhase, LadeFortschritt>>(new Map());
   const [ablage, setAblage] = useState<AblageErgebnis>();
+  /** Angehakte Zeilen fuer Sammelaktionen */
+  const [markiert, setMarkiert] = useState<Set<string>>(new Set());
   const [meldung, setMeldung] = useState<string>();
   const [fehler, setFehler] = useState<string>();
   /** Bricht einen noch laufenden Lade-Stream ab, wenn der Monat wechselt. */
@@ -99,6 +103,7 @@ export function App() {
     setAusgewaehlt(undefined);
     setReview(undefined);
     setAblage(undefined);
+    setMarkiert(new Set());
     setDaten(null);
     void laden();
     return () => abbruch.current?.abort();
@@ -207,6 +212,28 @@ export function App() {
         </div>
       )}
 
+      {markiert.size > 0 && (
+        <Sammelaktionen
+          anzahl={markiert.size}
+          laedt={laedt}
+          onAufheben={() => setMarkiert(new Set())}
+          onMarkieren={(markierung) =>
+            mitLadeanzeige(async () => {
+              setDaten(await api.patcheMehrere(monat, [...markiert], { markierung }));
+              setMarkiert(new Set());
+            })
+          }
+          onAusblenden={() =>
+            mitLadeanzeige(async () => {
+              setDaten(
+                await api.patcheMehrere(monat, [...markiert], { status: 'ignoriert' }),
+              );
+              setMarkiert(new Set());
+            })
+          }
+        />
+      )}
+
       <main>
         <div className="liste">
           {laedt && <Ladefortschritt phasen={phasen} laeuft={laedt} />}
@@ -215,6 +242,8 @@ export function App() {
               positionen={daten.positionen}
               ausgewaehlt={ausgewaehlt}
               onAuswahl={setAusgewaehlt}
+              markiert={markiert}
+              onMarkierungAendern={setMarkiert}
             />
           )}
 

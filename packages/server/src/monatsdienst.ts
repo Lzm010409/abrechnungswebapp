@@ -411,55 +411,39 @@ export class MonatsDienst {
     positionId: string,
     patch: PositionsPatch,
   ): Promise<Monat> {
+    return this.patcheMehrere(monat, [positionId], patch);
+  }
+
+  /**
+   * Dieselbe Korrektur an mehreren Buchungen.
+   *
+   * Wiederkehrende Posten - Miete, Leasing, Abos - einzeln zu markieren waere
+   * bei einem vollen Monat viel Klickarbeit. Der Sammelweg schreibt einmal und
+   * liefert den fertigen Monat zurueck, statt je Buchung eine Runde zu drehen.
+   */
+  async patcheMehrere(
+    monat: string,
+    positionIds: string[],
+    patch: PositionsPatch,
+  ): Promise<Monat> {
     const aktuell = this.deps.db.ladeMonat(monat);
     if (!aktuell) {
       throw new NichtGefunden(
         `Monat ${monat} ist noch nicht geladen. Zuerst aus sevDesk laden.`,
       );
     }
-
-    const position = aktuell.positionen.find((p) => p.id === positionId);
-    if (!position) {
-      throw new NichtGefunden(`Buchung ${positionId} existiert nicht in ${monat}.`);
+    if (positionIds.length === 0) {
+      throw new EingabeFehler('Keine Buchung ausgewaehlt.');
     }
 
-    const teil: Partial<Position> = {};
-
-    if (patch.aktenzeichen !== undefined) {
-      if (patch.aktenzeichen === null) {
-        teil.aktenzeichen = undefined;
-      } else {
-        const az = parseAktenzeichen(patch.aktenzeichen, 'manuell');
-        if (!az) {
-          throw new EingabeFehler(
-            `"${patch.aktenzeichen}" entspricht nicht dem Format MMYY/NummerTGXX ` +
-              '(Beispiel: 0626/1811TG01).',
-          );
-        }
-        teil.aktenzeichen = az;
+    for (const positionId of positionIds) {
+      const position = aktuell.positionen.find((p) => p.id === positionId);
+      if (!position) {
+        throw new NichtGefunden(`Buchung ${positionId} existiert nicht in ${monat}.`);
       }
-      // Ein manuell gesetztes Aktenzeichen beendet die Mehrdeutigkeit.
-      teil.aktenzeichenKandidaten = undefined;
+      this.deps.db.speichereOverride(monat, positionId, baueTeilPatch(position, patch));
     }
 
-    if (patch.markierung !== undefined) {
-      teil.markierung = patch.markierung ?? undefined;
-    }
-
-    if (patch.status !== undefined) teil.status = patch.status;
-    if (patch.hinweis !== undefined) teil.hinweis = patch.hinweis ?? undefined;
-
-    // Auswahl aus den Kandidaten: gewaehlte Dateien werden zu den zugeordneten,
-    // der Rest bleibt als Kandidat erhalten.
-    if (patch.dateiIds) {
-      const alle = [...position.dateien, ...(position.kandidaten ?? [])];
-      const gewaehlt = alle.filter((d) => patch.dateiIds!.includes(d.id));
-      teil.dateien = gewaehlt;
-      teil.kandidaten = alle.filter((d) => !patch.dateiIds!.includes(d.id));
-      teil.auswahlBestaetigt = true;
-    }
-
-    this.deps.db.speichereOverride(monat, positionId, teil);
     return this.veredele(monat, aktuell.positionen);
   }
 
@@ -553,4 +537,49 @@ async function nacheinanderBegrenzt<T, R>(
 
   await Promise.all(arbeiter);
   return ergebnis;
+}
+
+/**
+ * Uebersetzt einen Patch aus der Oberflaeche in Feldaenderungen an der Position.
+ * Getrennt von der Speicherung, damit Einzel- und Sammelweg dieselbe Auslegung
+ * verwenden.
+ */
+function baueTeilPatch(position: Position, patch: PositionsPatch): Partial<Position> {
+  const teil: Partial<Position> = {};
+
+  if (patch.aktenzeichen !== undefined) {
+    if (patch.aktenzeichen === null) {
+      teil.aktenzeichen = undefined;
+    } else {
+      const az = parseAktenzeichen(patch.aktenzeichen, 'manuell');
+      if (!az) {
+        throw new EingabeFehler(
+          `"${patch.aktenzeichen}" entspricht nicht dem Format MMYY/NummerTGXX ` +
+            '(Beispiel: 0626/1811TG01).',
+        );
+      }
+      teil.aktenzeichen = az;
+    }
+    // Ein manuell gesetztes Aktenzeichen beendet die Mehrdeutigkeit.
+    teil.aktenzeichenKandidaten = undefined;
+  }
+
+  if (patch.markierung !== undefined) {
+    teil.markierung = patch.markierung ?? undefined;
+  }
+
+  if (patch.status !== undefined) teil.status = patch.status;
+  if (patch.hinweis !== undefined) teil.hinweis = patch.hinweis ?? undefined;
+
+  // Auswahl aus den Kandidaten: gewaehlte Dateien werden zu den zugeordneten,
+  // der Rest bleibt als Kandidat erhalten.
+  if (patch.dateiIds) {
+    const alle = [...position.dateien, ...(position.kandidaten ?? [])];
+    const gewaehlt = alle.filter((d) => patch.dateiIds!.includes(d.id));
+    teil.dateien = gewaehlt;
+    teil.kandidaten = alle.filter((d) => !patch.dateiIds!.includes(d.id));
+    teil.auswahlBestaetigt = true;
+  }
+
+  return teil;
 }

@@ -215,6 +215,7 @@ export function Detailbereich({
             [
               ['privatentnahme', 'Privatentnahme'],
               ['dauerbeleg', 'Dauerbeleg'],
+              ['umbuchung', 'Umbuchung'],
             ] as const
           ).map(([wert, text]) => (
             <button

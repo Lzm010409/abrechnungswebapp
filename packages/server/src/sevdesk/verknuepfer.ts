@@ -155,6 +155,12 @@ function baueEinePosition(
  * der Position vorliegt: wer einen Beleg nachreicht oder aus den Kandidaten
  * waehlt, erwartet, dass die Ampel danach auf gruen springt.
  */
+const MARKIERUNGS_HINWEIS: Record<NonNullable<Position['markierung']>, string> = {
+  privatentnahme: 'Privatentnahme - kein Beleg erforderlich',
+  dauerbeleg: 'Dauerbeleg - der Beleg liegt einmalig vor (Vertrag, Abo)',
+  umbuchung: 'Umbuchung zwischen eigenen Konten - kein Beleg erforderlich',
+};
+
 export function aktualisiereStatus(
   position: Position,
   statusManuellGesetzt = false,
@@ -170,10 +176,7 @@ export function aktualisiereStatus(
       return {
         ...position,
         status: 'ok',
-        hinweis:
-          position.markierung === 'privatentnahme'
-            ? 'Privatentnahme - kein Beleg erforderlich'
-            : 'Dauerbeleg - der Beleg liegt einmalig vor (Vertrag, Abo)',
+        hinweis: MARKIERUNGS_HINWEIS[position.markierung],
       };
     }
     return { ...position, status: 'offen' };
@@ -234,6 +237,7 @@ export function berechneSummen(positionen: Position[]): MonatsSummen {
     anzahlOhneBelegpflicht: relevant.filter(
       (p) => p.markierung && p.dateien.length === 0,
     ).length,
+    anzahlUmbuchungen: relevant.filter((p) => p.markierung === 'umbuchung').length,
   };
 }
 

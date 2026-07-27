@@ -470,3 +470,25 @@ code { background: #f1f3f5; padding: 1px 4px; border-radius: 3px; font-size: 12p
   color: #fff;
   border-color: var(--akzent);
 }
+
+/* -- Sammelaktionen ---------------------------------------------------- */
+
+.sammelaktionen {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 20px;
+  background: #e8f2fd;
+  border-bottom: 1px solid #cfe0f3;
+}
+
+.sammelaktionen button { padding: 4px 10px; font-size: 13px; }
+.sammelaktionen .trenner { flex: 1; }
+
+.sp-haken { width: 30px; }
+.sp-haken input { cursor: pointer; }
+.positionen tbody tr.markiert { background: #eef5fd; }
+.positionen tbody tr.markiert.aktiv { background: #dbeafe; }
+
+.marke.umbuchung { background: #e7f3ee; color: #1e6b4a; }

@@ -130,7 +130,9 @@ export type Markierung =
   /** Entnahme fuer privat - gehoert in die Abrechnung, hat keinen Beleg */
   | 'privatentnahme'
   /** Miete, Leasing, Abo: der Beleg liegt einmalig als Vertrag vor */
-  | 'dauerbeleg';
+  | 'dauerbeleg'
+  /** Uebertrag zwischen eigenen Konten - dazu gibt es keinen Beleg */
+  | 'umbuchung';
 
 /** Eine Zeile der Monatsansicht: eine Bankbuchung samt allem, was daran haengt. */
 export interface Position {
@@ -196,8 +198,14 @@ export interface MonatsSummen {
    * abschliessend - die Zuordnung passiert in sevDesk, danach neu laden.
    */
   anzahlNichtZugeordnet: number;
-  /** Buchungen ohne Beleg, die auch keinen brauchen (Privat, Dauerbeleg) */
+  /** Buchungen ohne Beleg, die auch keinen brauchen (Privat, Dauer, Umbuchung) */
   anzahlOhneBelegpflicht: number;
+  /**
+   * Uebertraege zwischen eigenen Konten. Sie stecken in Einnahmen und Ausgaben
+   * mit drin - dort stehen die Kontobewegungen, und das ist eine davon. Wer
+   * den reinen Geschaeftserfolg will, rechnet sie heraus.
+   */
+  anzahlUmbuchungen: number;
 }
 
 /** Kompakter Zustand eines Monats - ohne die vollstaendige Positionsliste. */
@@ -351,6 +359,12 @@ export interface ReviewBefund {
   titel: string;
   beschreibung: string;
   positionIds: string[];
+}
+
+/** Mehrere Buchungen auf einmal aendern. */
+export interface SammelPatch {
+  positionIds: string[];
+  patch: PositionsPatch;
 }
 
 /** Patch-Body fuer manuelle Korrekturen an einer Position. */

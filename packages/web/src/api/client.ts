@@ -113,6 +113,13 @@ export const api = {
       body: JSON.stringify(patch),
     }),
 
+  /** Dieselbe Aenderung an mehreren Buchungen. */
+  patcheMehrere: (monat: string, positionIds: string[], patch: PositionsPatch) =>
+    anfrage<Monat>(`/api/months/${monat}/positions`, {
+      method: 'PATCH',
+      body: JSON.stringify({ positionIds, patch }),
+    }),
+
   setzeZurueck: (monat: string, positionId: string) =>
     anfrage<Monat>(`/api/months/${monat}/positions/${positionId}/override`, {
       method: 'DELETE',
