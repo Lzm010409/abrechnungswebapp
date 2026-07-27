@@ -17,10 +17,19 @@ export class ApiFehler extends Error {
 }
 
 async function anfrage<T>(pfad: string, init?: RequestInit): Promise<T> {
+  /*
+   * Der Typ wird nur gesetzt, wenn tatsaechlich JSON mitgeht. Ein POST ohne
+   * Body, aber mit "application/json" im Kopf, weist Fastify mit 400 ab
+   * (FST_ERR_CTP_EMPTY_JSON_BODY) - das hat alle Aufrufe ohne Body getroffen,
+   * darunter saemtliche KI-Funktionen.
+   */
+  const hatJsonKoerper =
+    init?.body !== undefined && init.body !== null && !(init.body instanceof FormData);
+
   const res = await fetch(pfad, {
     ...init,
     headers: {
-      ...(init?.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+      ...(hatJsonKoerper ? { 'Content-Type': 'application/json' } : {}),
       ...init?.headers,
     },
   });

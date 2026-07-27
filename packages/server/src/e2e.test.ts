@@ -492,6 +492,45 @@ describe('End-to-End: gesamte Programmkette', () => {
 
   // -------------------------------------------------------------------------
 
+  describe('POST ohne Koerper', () => {
+    /*
+     * Die Oberflaeche schickte bei Aufrufen ohne Daten trotzdem
+     * "Content-Type: application/json" mit. Fastify beantwortet das von sich
+     * aus mit 400 (FST_ERR_CTP_EMPTY_JSON_BODY) - saemtliche KI-Funktionen,
+     * die Ablage und der Sync liefen damit ins Leere.
+     */
+
+    beforeEach(async () => {
+      const daten = basisDaten();
+      daten.transaktionen.push(tx({ id: 'tx-1', amount: '-50.00' }));
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp();
+    });
+
+    for (const pfad of ['sync', 'ablage']) {
+      it(`nimmt /${pfad} auch mit leerem JSON-Koerper an`, async () => {
+        const res = await app.inject({
+          method: 'POST',
+          url: `/api/months/${MONAT}/${pfad}`,
+          headers: { 'content-type': 'application/json' },
+        });
+        expect(res.statusCode, res.body).toBe(200);
+      });
+    }
+
+    it('weist kaputtes JSON weiterhin mit 400 ab', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/months/${MONAT}/report`,
+        headers: { 'content-type': 'application/json' },
+        payload: '{ das ist kein JSON',
+      });
+      expect(res.statusCode).toBe(400);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
   describe('Sammelaenderung an mehreren Buchungen', () => {
     // Wiederkehrende Posten einzeln zu markieren waere bei einem vollen Monat
     // viel Klickarbeit - und jede Runde eine eigene Anfrage.

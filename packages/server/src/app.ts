@@ -104,6 +104,27 @@ export async function baueApp(config: Config): Promise<AppInstanz> {
     bodyLimit: 50 * 1024 * 1024,
   });
 
+  /*
+   * Ein POST ohne Body ist fuer die Auslose-Endpunkte (KI, Ablage, Sync) der
+   * Normalfall. Fastify beantwortet ihn von sich aus mit 400, sobald der
+   * Aufrufer "application/json" mitschickt - also auch dann, wenn schlicht
+   * nichts zu uebergeben ist. Ein leerer Koerper gilt hier als leeres Objekt.
+   */
+  app.addContentTypeParser(
+    'application/json',
+    { parseAs: 'string' },
+    (_req, koerper: string, fertig) => {
+      if (koerper.trim().length === 0) return fertig(null, {});
+      try {
+        fertig(null, JSON.parse(koerper));
+      } catch (err) {
+        const fehler = err as Error & { statusCode?: number };
+        fehler.statusCode = 400;
+        fertig(fehler, undefined);
+      }
+    },
+  );
+
   await app.register(multipart, {
     limits: { fileSize: 50 * 1024 * 1024, files: 20 },
   });
