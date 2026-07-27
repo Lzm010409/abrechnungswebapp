@@ -23,6 +23,10 @@ services:
       SEVDESK_CHECK_ACCOUNT_ID: ${SEVDESK_CHECK_ACCOUNT_ID:-}
       # Optional - Rechnungsabruf aus dem OneDrive-Gutachtenordner
       N8N_FIND_RECHNUNG_URL: ${N8N_FIND_RECHNUNG_URL:-}
+      # Optional - Belegablage in die OneDrive-Monatsordner; nur beide
+      # zusammen schalten sie frei, sonst bleibt es bei der Vorschau
+      N8N_ORDNER_URL: ${N8N_ORDNER_URL:-}
+      N8N_ABLAGE_URL: ${N8N_ABLAGE_URL:-}
       N8N_WEBHOOK_AUTH_HEADER: ${N8N_WEBHOOK_AUTH_HEADER:-}
       N8N_WEBHOOK_AUTH_VALUE: ${N8N_WEBHOOK_AUTH_VALUE:-}
       # Optional - kann jederzeit spaeter nachgetragen werden

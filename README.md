@@ -90,6 +90,8 @@ ausschließlich für die Arbeit auf dem eigenen Rechner gedacht.
 | `ENTRA_REDIRECT_URI` | nein | wird aus der aufgerufenen Adresse gebildet |
 | `SEVDESK_CHECK_ACCOUNT_ID` | nein | Bankkonto wird beim Start automatisch ermittelt |
 | `N8N_FIND_RECHNUNG_URL` | nein | Ausgangsrechnungen kommen aus sevDesk statt als Original aus OneDrive |
+| `N8N_ORDNER_URL` | nein | Belegablage bleibt bei der Vorschau, es wird nichts nach OneDrive geschrieben |
+| `N8N_ABLAGE_URL` | nein | dito — beide Adressen müssen gesetzt sein |
 | `ANTHROPIC_API_KEY` | nein | KI-Funktionen inaktiv, Rest läuft vollständig |
 | `ENTRA_ERLAUBTE_BENUTZER` | nein | jedes Konto des Tenants darf sich anmelden |
 | `ENTRA_ERLAUBTE_GRUPPEN` | nein | keine Gruppenprüfung |
@@ -148,11 +150,11 @@ Mehrere aktive Bankkonten gefunden - bitte SEVDESK_CHECK_ACCOUNT_ID setzen:
 1234567 (Geschäftskonto, DE89…3000), 1234568 (Rücklagen, DE89…3001)
 ```
 
-### Die beiden optionalen Funktionen aktivieren
+### Die optionalen Funktionen aktivieren
 
-Beide sind bewusst abschaltbar: die Anwendung läuft ohne sie vollständig. Was
-fehlt, steht unter dem Monatstitel („OneDrive-Abruf inaktiv", „KI inaktiv").
-Beide werden über eine Umgebungsvariable eingeschaltet, danach **Neustart der
+Alle drei sind bewusst abschaltbar: die Anwendung läuft ohne sie vollständig.
+Was fehlt, steht unter dem Monatstitel („OneDrive-Abruf inaktiv", „KI inaktiv").
+Jede wird über Umgebungsvariablen eingeschaltet, danach **Neustart der
 Anwendung** — in Coolify genügt *Redeploy*.
 
 #### 1. OneDrive-Abruf — `N8N_FIND_RECHNUNG_URL`
@@ -202,11 +204,51 @@ nur beim Klick an — es läuft nichts automatisch im Hintergrund. Belege werden
 je Datei-Hash zwischengespeichert, dieselbe Datei geht also nie zweimal an das
 Modell.
 
-Prüfen, ob beides greift:
+#### 3. Belegablage in OneDrive — `N8N_ORDNER_URL` / `N8N_ABLAGE_URL`
+
+**Wofür:** die Belege eines Monats in die OneDrive-Monatsordner `Konto`, `Bar`
+und `Tanken` einsortieren — siehe [Belege nach OneDrive
+einsortieren](#belege-nach-onedrive-einsortieren). Fehlt eine der beiden
+Adressen, bleibt es bei der Vorschau: die Einteilung wird berechnet und
+angezeigt, geschrieben wird nichts.
+
+**Wie:** beide Workflows sind angelegt und müssen in n8n nur **aktiviert**
+werden; danach die jeweilige *Production URL* des Webhook-Knotens eintragen.
+
+| Variable | Workflow | ID |
+|---|---|---|
+| `N8N_ORDNER_URL` | Find Ausgabenordner für Jahr und Monat | `FfLNDgPrXdV6lJe3` |
+| `N8N_ABLAGE_URL` | Zuordnung der Dateien in die Ordner | `oaYHe4LgfsYWBK3j` |
+
+Die Ordnersuche bekommt eine **Liste mit einem Eintrag**, Jahr vierstellig,
+Monat zweistellig; aus der Antwort wird die erste Zeichenkette genommen, die
+nach einer OneDrive-Kennung aussieht (`ordnerId`, `folderId`, `id`, `itemId`,
+`driveItemId` — sonst der erste Treffer in der Tiefensuche):
+
+```
+POST [ { "jahr": "2026", "monat": "07" } ]
+→    [ { "id": "01ABCDEF…" } ]
+```
+
+Die Ablage bekommt je Datei einen Aufruf, `inhalt` ist base64:
+
+```
+POST { "ordnerId": "01ABCDEF…", "unterordner": "Bar",
+       "dateiname": "0726_1800TG01.pdf", "inhalt": "<base64>" }
+```
+
+Scheitert eine einzelne Datei, wird der Fehler an ihr vermerkt und die
+restlichen werden trotzdem abgelegt. Auch hier gilt: sollen die Webhooks nicht
+offen erreichbar sein, in n8n Header-Auth aktivieren und
+`N8N_WEBHOOK_AUTH_HEADER` / `N8N_WEBHOOK_AUTH_VALUE` setzen — sie gelten für
+alle drei Workflows gemeinsam.
+
+Prüfen, ob alles greift:
 
 ```
 GET /api/capabilities
-→ { "ki": true, "kiModell": "claude-sonnet-5", "n8nRechnungsabruf": true, … }
+→ { "ki": true, "kiModell": "claude-sonnet-5", "n8nRechnungsabruf": true,
+    "onedriveAblage": true, … }
 ```
 
 ---
@@ -457,9 +499,7 @@ ohne weitere Einstellung.
 
 ---
 
-## Geplant
-
-### Belege nach OneDrive einsortieren
+## Belege nach OneDrive einsortieren
 
 Beim Erzeugen des Abrechnungs-PDF werden die Belege den Monatsordnern
 zugeteilt:
@@ -487,11 +527,12 @@ POST /api/months/2026-06/ablage                 → Vorschau
 POST /api/months/2026-06/ablage?ausfuehren=true → legt ab
 ```
 
-Was noch fehlt: `N8N_ABLAGE_URL`, also ein Workflow, der eine Datei in einen
-Unterordner legt. Er bekommt `{ ordnerId, unterordner, dateiname, inhalt }`,
-wobei `inhalt` base64 ist. Die Ordner-ID liefert der vorhandene Workflow
-**Find Ausgabenordner für Jahr und Monat** (`FfLNDgPrXdV6lJe3`), aufgerufen mit
-`{ jahr: "26", monat: "06" }`.
+Geschrieben wird über zwei n8n-Workflows: **Find Ausgabenordner für Jahr und
+Monat** (`FfLNDgPrXdV6lJe3`) liefert zu `[{ jahr, monat }]` die Ordner-ID,
+**Zuordnung der Dateien in die Ordner** (`oaYHe4LgfsYWBK3j`) legt je Aufruf eine
+Datei ab. Beide Adressen werden über `N8N_ORDNER_URL` und `N8N_ABLAGE_URL`
+gesetzt — Aufrufformat und Einrichtung stehen unter [Belegablage in
+OneDrive](#3-belegablage-in-onedrive--n8n_ordner_url--n8n_ablage_url).
 
 ---
 

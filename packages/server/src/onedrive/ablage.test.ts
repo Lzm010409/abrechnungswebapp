@@ -158,8 +158,8 @@ describe('Ablegen ueber n8n', () => {
     expect(ergebnis.ausgefuehrt).toBe(true);
     expect(ergebnis.ordnerId).toBe('ORDNER-123');
 
-    // Jahr und Monat zweistellig, so erwartet es der Workflow.
-    expect(aufrufe[0]!.body).toMatchObject({ jahr: '26', monat: '06' });
+    // Liste mit einem Eintrag, Jahr vierstellig - so erwartet es der Workflow.
+    expect(aufrufe[0]!.body).toEqual([{ jahr: '2026', monat: '06' }]);
     expect(aufrufe[1]!.body).toMatchObject({
       ordnerId: 'ORDNER-123',
       unterordner: 'Bar',

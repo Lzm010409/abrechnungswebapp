@@ -170,12 +170,9 @@ export class OneDriveAblage {
   // -------------------------------------------------------------------------
 
   private async ermittleOrdner(jahr: string, monat: string): Promise<string | undefined> {
-    // Zwei Zeichen je Feld, so erwartet es der Workflow: "26" und "06".
-    const antwort = await this.rufe(this.opts.ordnerUrl!, {
-      jahr: jahr.slice(-2),
-      monat,
-      jahrLang: jahr,
-    });
+    // Der Workflow "Find Ausgabenordner" erwartet eine Liste mit einem Eintrag,
+    // das Jahr vierstellig und den Monat zweistellig: [{ jahr: "2026", monat: "07" }].
+    const antwort = await this.rufe(this.opts.ordnerUrl!, [{ jahr, monat }]);
 
     return sucheOrdnerId(antwort);
   }
