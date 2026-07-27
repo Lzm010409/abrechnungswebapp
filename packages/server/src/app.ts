@@ -59,7 +59,10 @@ export async function baueApp(config: Config): Promise<AppInstanz> {
     );
   } else {
     app.log.info(
-      { tenant: config.auth.entra!.tenantId, redirect: config.auth.entra!.redirectUri },
+      {
+        tenant: config.auth.entra!.tenantId,
+        redirect: config.auth.entra!.redirectUri ?? 'aus der Anfrage abgeleitet',
+      },
       'Anmeldung ueber Microsoft Entra ID aktiv',
     );
   }

@@ -92,7 +92,9 @@ export async function registriereAuth(
 
   app.get<{ Querystring: { redirect?: string } }>('/auth/login', async (req, reply) => {
     const ziel = sichererPfad(req.query.redirect);
-    const { autorisierungsUrl, uebergang } = await entra.starte(ziel);
+    // Ohne feste ENTRA_REDIRECT_URI wird der Rueckweg aus der aufgerufenen
+    // Adresse gebildet - eine Variable weniger, die zur Umgebung passen muss.
+    const { autorisierungsUrl, uebergang } = await entra.starte(ziel, ganzeUrl(req));
 
     return reply
       .setCookie(UEBERGANG, uebergang, { ...cookieOptionen, maxAge: 600 })

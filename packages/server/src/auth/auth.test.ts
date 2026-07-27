@@ -193,6 +193,42 @@ describe('Anmeldeweg', () => {
     expect(res.headers['set-cookie']).toBeDefined();
   });
 
+  it('verwendet die fest konfigurierte Redirect-URI', async () => {
+    await starte(auth);
+    const res = await app.inject({ url: '/auth/login', headers: { host: 'intern:3000' } });
+    const ziel = new URL(res.headers.location as string);
+    // Eine gesetzte ENTRA_REDIRECT_URI schlaegt die Anfrage - fuer Faelle, in
+    // denen die Anwendung intern anders heisst als nach aussen.
+    expect(ziel.searchParams.get('redirect_uri')).toBe(
+      'https://abrechnung.example/auth/callback',
+    );
+  });
+
+  it('bildet die Redirect-URI aus der Anfrage, wenn keine gesetzt ist', async () => {
+    await starte({ ...auth, entra: { ...auth.entra!, redirectUri: undefined } });
+    const res = await app.inject({
+      url: '/auth/login',
+      headers: { host: 'abrechnung.gollenstede.app', 'x-forwarded-proto': 'https' },
+    });
+
+    const ziel = new URL(res.headers.location as string);
+    expect(ziel.searchParams.get('redirect_uri')).toBe(
+      'https://abrechnung.gollenstede.app/auth/callback',
+    );
+  });
+
+  it('uebernimmt beim Ableiten das Schema des Reverse-Proxy', async () => {
+    // Der Proxy terminiert TLS; ohne x-forwarded-proto entstuende http und
+    // Entra wuerde die URI nicht wiedererkennen.
+    await starte({ ...auth, entra: { ...auth.entra!, redirectUri: undefined } });
+    const res = await app.inject({
+      url: '/auth/login',
+      headers: { host: 'abrechnung.example', 'x-forwarded-proto': 'https' },
+    });
+    expect(String(new URL(res.headers.location as string).searchParams.get('redirect_uri')))
+      .toMatch(/^https:\/\//);
+  });
+
   it('setzt das Sitzungscookie mit HttpOnly und Secure', async () => {
     await starte(auth);
     const res = await app.inject({ url: '/auth/login' });

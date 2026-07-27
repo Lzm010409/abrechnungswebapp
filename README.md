@@ -85,8 +85,8 @@ ausschließlich für die Arbeit auf dem eigenen Rechner gedacht.
 | `ENTRA_TENANT_ID` | ja | Server startet nicht |
 | `ENTRA_CLIENT_ID` | ja | Server startet nicht |
 | `ENTRA_CLIENT_SECRET` | ja | Server startet nicht |
-| `ENTRA_REDIRECT_URI` | ja | Server startet nicht |
 | `SESSION_SECRET` | ja | Server startet nicht (mind. 32 Zeichen) |
+| `ENTRA_REDIRECT_URI` | nein | wird aus der aufgerufenen Adresse gebildet |
 | `SEVDESK_CHECK_ACCOUNT_ID` | nein | Bankkonto wird beim Start automatisch ermittelt |
 | `N8N_FIND_RECHNUNG_URL` | nein | Ausgangsrechnungen kommen aus sevDesk statt als Original aus OneDrive |
 | `ANTHROPIC_API_KEY` | nein | KI-Funktionen inaktiv, Rest läuft vollständig |
@@ -114,7 +114,9 @@ Neue Registrierung):
    Organisationsverzeichnis*.
 2. Redirect-URI, Plattform **Web**:
    `https://abrechnung.example.de/auth/callback`
-   → als `ENTRA_REDIRECT_URI` eintragen, buchstabengleich.
+   Das ist der einzige Ort, an dem sie stehen muss — der Server bildet sie
+   selbst aus der Adresse, unter der er aufgerufen wurde. `ENTRA_REDIRECT_URI`
+   ist nur nötig, wenn die Anwendung intern anders heißt als nach außen.
 3. Übersicht: *Anwendungs-ID* → `ENTRA_CLIENT_ID`,
    *Verzeichnis-ID* → `ENTRA_TENANT_ID`.
 4. *Zertifikate & Geheimnisse* → neuer geheimer Clientschlüssel →
@@ -325,7 +327,7 @@ Zweifelsfälle — Beträge, Verknüpfungen und Summen kommen aus sevDesk.
 npm test
 ```
 
-206 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+209 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 
@@ -366,8 +368,7 @@ erzeugte PDFs.
 
 **Vor dem nächsten Deploy** müssen die Entra-Variablen gesetzt sein
 (`ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`,
-`ENTRA_REDIRECT_URI`, `SESSION_SECRET`). Fehlen sie, verweigert der Server den
-Start — das ist Absicht: die Anwendung war zuvor ohne Anmeldung öffentlich
+`SESSION_SECRET`). Fehlen sie, verweigert der Server den Start — das ist Absicht: die Anwendung war zuvor ohne Anmeldung öffentlich
 erreichbar und wurde in den Logs nachweislich nach `.env` und `.git/config`
 abgesucht.
 

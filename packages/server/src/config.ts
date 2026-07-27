@@ -54,7 +54,8 @@ export interface Config {
       tenantId: string;
       clientId: string;
       clientSecret: string;
-      redirectUri: string;
+      /** Optional - ohne Angabe aus der aufgerufenen Adresse gebildet. */
+      redirectUri?: string;
       sessionSecret: string;
       erlaubteBenutzer: string[];
       erlaubteGruppen: string[];
@@ -90,11 +91,13 @@ function ladeAuth(): Config['auth'] {
   const redirectUri = env('ENTRA_REDIRECT_URI');
   const sessionSecret = env('SESSION_SECRET');
 
+  // ENTRA_REDIRECT_URI fehlt hier bewusst: ohne Angabe bildet der Server den
+  // Rueckweg aus der Adresse, unter der er aufgerufen wurde. Gesetzt werden
+  // muss sie nur, wenn die Anwendung intern anders heisst als nach aussen.
   const fehlend = [
     ['ENTRA_TENANT_ID', tenantId],
     ['ENTRA_CLIENT_ID', clientId],
     ['ENTRA_CLIENT_SECRET', clientSecret],
-    ['ENTRA_REDIRECT_URI', redirectUri],
     ['SESSION_SECRET', sessionSecret],
   ]
     .filter(([, wert]) => !wert)
@@ -125,7 +128,7 @@ function ladeAuth(): Config['auth'] {
       tenantId: tenantId!,
       clientId: clientId!,
       clientSecret: clientSecret!,
-      redirectUri: redirectUri!,
+      redirectUri,
       sessionSecret: sessionSecret!,
       erlaubteBenutzer: liste('ENTRA_ERLAUBTE_BENUTZER'),
       erlaubteGruppen: liste('ENTRA_ERLAUBTE_GRUPPEN'),

@@ -18,8 +18,11 @@ export interface EntraKonfiguration {
   tenantId: string;
   clientId: string;
   clientSecret: string;
-  /** Muss exakt der in Entra hinterlegten Redirect-URI entsprechen. */
-  redirectUri: string;
+  /**
+   * Feste Redirect-URI. Ohne Angabe wird sie aus der Anfrage gebildet
+   * (Schema + Host + /auth/callback) - siehe `starte`.
+   */
+  redirectUri?: string;
   /** Schluessel zum Signieren der eigenen Sitzungscookies. */
   sessionSecret: string;
   /** Sitzungsdauer in Sekunden. */
@@ -45,6 +48,12 @@ interface UebergangsDaten extends JWTPayload {
   nonce: string;
   codeVerifier: string;
   ziel: string;
+  /**
+   * Die beim Start verwendete Redirect-URI. OAuth verlangt beim Token-Tausch
+   * denselben Wert wie in der Autorisierungsanfrage - deshalb wandert er
+   * signiert mit, statt erneut hergeleitet zu werden.
+   */
+  redirectUri: string;
 }
 
 export class EntraAnmeldung {
@@ -72,6 +81,25 @@ export class EntraAnmeldung {
     return `https://login.microsoftonline.com/${this.config.tenantId}/v2.0`;
   }
 
+  /**
+   * Die zu verwendende Redirect-URI.
+   *
+   * Ist keine konfiguriert, wird sie aus der Adresse gebildet, unter der die
+   * Anwendung gerade aufgerufen wurde. Das ist unbedenklich, obwohl der
+   * Host-Kopf vom Aufrufer stammt: Entra akzeptiert nur URIs, die in der
+   * App-Registrierung hinterlegt sind. Ein gefaelschter Host fuehrt daher zu
+   * einer abgelehnten Anmeldung, nicht zu einer Umleitung auf fremde Seiten.
+   */
+  private redirectUriFuer(herkunft?: string): string {
+    if (this.config.redirectUri) return this.config.redirectUri;
+    if (!herkunft) {
+      throw new Error(
+        'Die Redirect-URI laesst sich nicht bestimmen. Bitte ENTRA_REDIRECT_URI setzen.',
+      );
+    }
+    return new URL('/auth/callback', herkunft).toString();
+  }
+
   /** URL, auf die nach dem Abmelden umgeleitet wird. */
   abmeldeUrl(zurueck: string): string {
     const url = new URL(
@@ -82,10 +110,15 @@ export class EntraAnmeldung {
   }
 
   /**
-   * Beginnt die Anmeldung. `ziel` ist der Pfad, auf den nach erfolgreicher
-   * Anmeldung zurueckgesprungen wird.
+   * Beginnt die Anmeldung.
+   *
+   * `ziel` ist der Pfad, auf den nach erfolgreicher Anmeldung zurueckgesprungen
+   * wird. `herkunft` ist die Basis-URL, unter der die Anwendung gerade
+   * aufgerufen wurde ("https://abrechnung.example"); daraus entsteht die
+   * Redirect-URI, sofern keine fest konfiguriert ist.
    */
-  async starte(ziel: string): Promise<AnmeldeStart> {
+  async starte(ziel: string, herkunft?: string): Promise<AnmeldeStart> {
+    const redirectUri = this.redirectUriFuer(herkunft);
     const state = randomBytes(24).toString('base64url');
     const nonce = randomBytes(24).toString('base64url');
     const codeVerifier = randomBytes(48).toString('base64url');
@@ -94,7 +127,7 @@ export class EntraAnmeldung {
     const url = new URL(this.autorisierungsEndpunkt);
     url.searchParams.set('client_id', this.config.clientId);
     url.searchParams.set('response_type', 'code');
-    url.searchParams.set('redirect_uri', this.config.redirectUri);
+    url.searchParams.set('redirect_uri', redirectUri);
     url.searchParams.set('response_mode', 'query');
     // openid/profile/email genuegen - die Anwendung braucht keine Graph-Rechte.
     url.searchParams.set('scope', 'openid profile email');
@@ -105,7 +138,7 @@ export class EntraAnmeldung {
 
     // Der Uebergangszustand liegt signiert im Browser, nicht im Serverspeicher.
     // Damit ueberlebt eine laufende Anmeldung auch einen Neustart des Servers.
-    const uebergang = await new SignJWT({ state, nonce, codeVerifier, ziel })
+    const uebergang = await new SignJWT({ state, nonce, codeVerifier, ziel, redirectUri })
       .setProtectedHeader({ alg: 'HS256' })
       .setIssuedAt()
       .setExpirationTime('10m')
@@ -150,7 +183,7 @@ export class EntraAnmeldung {
         client_secret: this.config.clientSecret,
         grant_type: 'authorization_code',
         code,
-        redirect_uri: this.config.redirectUri,
+        redirect_uri: uebergang.redirectUri,
         code_verifier: uebergang.codeVerifier,
         scope: 'openid profile email',
       }),
