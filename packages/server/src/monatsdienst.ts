@@ -97,7 +97,12 @@ export class MonatsDienst {
     for (const [i, position] of positionen.entries()) {
       const alle = [...position.dateien, ...(position.kandidaten ?? [])];
       for (const datei of alle) {
-        if (!(await ablage.existiert(monat, datei.id))) {
+        // Fehlt oder ist unbrauchbar - beides heisst: neu holen. Unbrauchbar
+        // waren Belege, die sevDesk als base64-Text statt als PDF lieferte.
+        const brauchbar =
+          (await ablage.existiert(monat, datei.id)) &&
+          (await ablage.istUnversehrt(monat, datei));
+        if (!brauchbar) {
           luecken.push(i);
           break;
         }
@@ -108,7 +113,7 @@ export class MonatsDienst {
 
     log?.warn(
       { monat, anzahl: luecken.length },
-      'Belegdateien fehlen im Datenverzeichnis - sie werden neu geholt',
+      'Belegdateien fehlen oder sind unbrauchbar - sie werden neu geholt',
     );
 
     const ergebnis = [...positionen];

@@ -320,19 +320,9 @@ export class SevDeskClient {
 
         const contentType = res.headers.get('content-type') ?? '';
         const rohdaten = Buffer.from(await res.arrayBuffer());
+        const kopfName = dateinameAusHeader(res.headers.get('content-disposition'));
 
-        // Fall 1: JSON-Huelle mit base64-Inhalt.
-        if (contentType.includes('json')) {
-          return this.leseJsonDatei(rohdaten, standardName);
-        }
-
-        // Fall 2: roher Dateistrom.
-        if (rohdaten.byteLength === 0) return null;
-        return {
-          daten: rohdaten,
-          dateiname: dateinameAusHeader(res.headers.get('content-disposition')) ?? standardName,
-          mimeType: contentType.split(';')[0]?.trim() || erkenneMimeType(rohdaten),
-        };
+        return this.deuteDatei(rohdaten, contentType, kopfName ?? standardName);
       } catch (err) {
         letzterFehler = err;
         if (err instanceof SevDeskFehler) throw err;
@@ -349,6 +339,51 @@ export class SevDeskClient {
   }
 
   /**
+   * Entscheidet anhand des Inhalts, was sevDesk geliefert hat.
+   *
+   * Bewusst nicht anhand des Content-Type: der stimmt bei sevDesk nicht
+   * verlaesslich. Beobachtet wurden drei Formen - eine JSON-Huelle mit
+   * base64-Inhalt, der rohe Dateistrom, und blanker base64-Text ohne jede
+   * Huelle. Die letzte Form landete ungeprueft als Datei auf der Platte; im
+   * PDF-Betrachter kam dann "Datei kann nicht geoeffnet werden", weil dort
+   * schlicht Text stand statt eines PDF.
+   */
+  private deuteDatei(
+    rohdaten: Buffer,
+    contentType: string,
+    dateiname: string,
+  ): Datei | null {
+    if (rohdaten.byteLength === 0) return null;
+
+    if (siehtNachJsonAus(rohdaten)) {
+      return this.leseJsonDatei(rohdaten, dateiname);
+    }
+
+    const signatur = erkenneSignatur(rohdaten);
+    if (signatur) {
+      return { daten: rohdaten, dateiname, mimeType: signatur };
+    }
+
+    // Keine bekannte Signatur - also womoeglich base64-Text.
+    const dekodiert = dekodiereBase64(rohdaten);
+    if (dekodiert) {
+      return {
+        daten: dekodiert,
+        dateiname,
+        mimeType: erkenneSignatur(dekodiert) ?? 'application/pdf',
+      };
+    }
+
+    // Unbekanntes Format. Ausliefern statt verwerfen - moeglicherweise ein
+    // Format, dessen Signatur hier nur nicht hinterlegt ist.
+    return {
+      daten: rohdaten,
+      dateiname,
+      mimeType: contentType.split(';')[0]?.trim() || 'application/octet-stream',
+    };
+  }
+
+  /**
    * Wertet die JSON-Variante aus. sevDesk legt den Inhalt je nach Endpunkt
    * unter objects.content ab oder gibt objects direkt als Base64-String zurueck.
    */
@@ -357,11 +392,11 @@ export class SevDeskClient {
     try {
       geparst = JSON.parse(rohdaten.toString('utf8'));
     } catch {
-      // Als JSON angekuendigt, war aber keines - dann eben als Datei behandeln.
+      // Sah nach JSON aus, war aber keines - dann eben als Datei behandeln.
       return {
         daten: rohdaten,
         dateiname: standardName,
-        mimeType: erkenneMimeType(rohdaten),
+        mimeType: erkenneSignatur(rohdaten) ?? 'application/octet-stream',
       };
     }
 
@@ -369,18 +404,25 @@ export class SevDeskClient {
     if (!obj) return null;
 
     if (typeof obj === 'string') {
+      const daten = inhaltZuBuffer(obj);
       return {
-        daten: Buffer.from(obj, 'base64'),
+        daten,
         dateiname: standardName,
-        mimeType: 'application/pdf',
+        mimeType: erkenneSignatur(daten) ?? 'application/pdf',
       };
     }
 
-    if (!obj.content) return null;
+    // Der Inhalt steckt je nach Endpunkt unter unterschiedlichen Namen.
+    const inhalt = obj.content ?? obj.base64 ?? obj.file ?? obj.data;
+    if (typeof inhalt !== 'string' || inhalt.length === 0) return null;
+
+    const daten = inhaltZuBuffer(inhalt, obj.base64encoded);
     return {
-      daten: Buffer.from(obj.content, 'base64'),
+      daten,
       dateiname: obj.filename ?? standardName,
-      mimeType: obj.mimeType ?? 'application/pdf',
+      // Die Signatur schlaegt die Angabe: sevDesk hat PDFs schon als
+      // "image/..." ausgewiesen, was die Anzeige im Browser gekostet hat.
+      mimeType: erkenneSignatur(daten) ?? obj.mimeType ?? 'application/pdf',
     };
   }
 
@@ -418,13 +460,81 @@ function dateinameAusHeader(header: string | null): string | undefined {
   return einfach?.[1];
 }
 
-/** Notbehelf, wenn der Server keinen brauchbaren Content-Type mitschickt. */
-function erkenneMimeType(daten: Buffer): string {
-  const kopf = daten.subarray(0, 5).toString('latin1');
+/**
+ * Bestimmt den Typ anhand der ersten Bytes. undefined heisst: keine bekannte
+ * Signatur - der Aufrufer entscheidet dann, was das zu bedeuten hat.
+ */
+export function erkenneSignatur(daten: Buffer): string | undefined {
+  const kopf = daten.subarray(0, 8).toString('latin1');
   if (kopf.startsWith('%PDF-')) return 'application/pdf';
   if (daten[0] === 0xff && daten[1] === 0xd8) return 'image/jpeg';
   if (kopf.startsWith('\x89PNG')) return 'image/png';
-  return 'application/octet-stream';
+  if (kopf.startsWith('GIF8')) return 'image/gif';
+  if (kopf.startsWith('II*\x00') || kopf.startsWith('MM\x00*')) return 'image/tiff';
+  if (kopf.startsWith('RIFF') && daten.subarray(8, 12).toString('latin1') === 'WEBP') {
+    return 'image/webp';
+  }
+  return undefined;
+}
+
+/**
+ * Macht aus dem Inhaltsfeld der JSON-Huelle Bytes.
+ *
+ * sevDesk fuehrt dazu das Feld base64encoded - mal als Boolean, mal als
+ * String, mal gar nicht. Verlassen kann man sich darauf nicht, also entscheidet
+ * die Dateisignatur; die Angabe dient nur als letzter Schiedsrichter.
+ */
+function inhaltZuBuffer(inhalt: string, base64encoded?: boolean | string | null): Buffer {
+  const alsBase64 = Buffer.from(inhalt, 'base64');
+  if (erkenneSignatur(alsBase64)) return alsBase64;
+
+  const alsRoh = Buffer.from(inhalt, 'latin1');
+  if (erkenneSignatur(alsRoh)) return alsRoh;
+
+  const angeblichRoh = base64encoded === false || base64encoded === 'false';
+  return angeblichRoh ? alsRoh : alsBase64;
+}
+
+/** Erstes Zeichen ohne Leerraum ist { oder [ - dann ist es JSON. */
+function siehtNachJsonAus(daten: Buffer): boolean {
+  for (const byte of daten.subarray(0, 64)) {
+    if (byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d) continue;
+    return byte === 0x7b || byte === 0x5b;
+  }
+  return false;
+}
+
+/** Wie viele Bytes hoechstens auf base64 geprueft werden. */
+const BASE64_PRUEFLAENGE = 4096;
+
+/**
+ * Versucht, blanken base64-Text zu dekodieren.
+ *
+ * Gibt nur dann etwas zurueck, wenn das Ergebnis eine bekannte Dateisignatur
+ * traegt - sonst waere jede Textdatei ein Kandidat, und aus einem lesbaren
+ * Fehlertext wuerde stillschweigend Datenmuell.
+ */
+function dekodiereBase64(daten: Buffer): Buffer | undefined {
+  // Nur ASCII-Text kommt in Frage; Binaerdaten gar nicht erst anfassen.
+  const probe = daten.subarray(0, BASE64_PRUEFLAENGE);
+  for (const byte of probe) {
+    if (byte !== 0x09 && byte !== 0x0a && byte !== 0x0d && (byte < 0x20 || byte > 0x7e)) {
+      return undefined;
+    }
+  }
+
+  let text = daten.toString('latin1').trim();
+
+  // Vorkommende Verpackungen: ein blanker JSON-String, oder eine data-URL.
+  if (text.startsWith('"') && text.endsWith('"')) text = text.slice(1, -1);
+  const datenUrl = text.match(/^data:[^;,]*;base64,(.*)$/s);
+  if (datenUrl?.[1]) text = datenUrl[1];
+
+  const kompakt = text.replace(/\s+/g, '');
+  if (kompakt.length < 8 || !/^[A-Za-z0-9+/]+={0,2}$/.test(kompakt)) return undefined;
+
+  const dekodiert = Buffer.from(kompakt, 'base64');
+  return erkenneSignatur(dekodiert) ? dekodiert : undefined;
 }
 
 /** ISO-Datum -> Unix-Sekunden. `endeDesTages` schiebt auf 23:59:59. */

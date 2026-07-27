@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import type { BelegDatei, BelegQuelle } from '@abrechnung/shared';
@@ -54,7 +54,11 @@ export class Dateiablage {
     await mkdir(basis, { recursive: true });
     const pfad = await this.pfadFuer(monat, id);
 
-    if (!existsSync(pfad)) {
+    // Die ID ist der Inhalts-Hash, eine vorhandene Datei sollte also identisch
+    // sein. Weicht die Groesse ab, ist sie es nicht - etwa nach einem
+    // abgebrochenen Schreibvorgang oder weil frueher der falsche Inhalt
+    // abgelegt wurde. Dann neu schreiben statt der alten Fassung zu vertrauen.
+    if (!existsSync(pfad) || (await stat(pfad)).size !== daten.byteLength) {
       await writeFile(pfad, daten);
     }
 
@@ -74,6 +78,33 @@ export class Dateiablage {
 
   async existiert(monat: string, dateiId: string): Promise<boolean> {
     return existsSync(await this.pfadFuer(monat, dateiId));
+  }
+
+  /**
+   * Prueft, ob unter der ID tatsaechlich das steht, was der Name verspricht.
+   *
+   * Anlass: sevDesk hat Belege schon als blanken base64-Text geliefert, der
+   * ungeprueft als "…​.pdf" auf der Platte landete. Herunterladen liess er sich,
+   * oeffnen nicht. Solche Dateien sollen beim naechsten Laden ersetzt werden,
+   * ohne dass jemand von Hand nachhelfen muss.
+   *
+   * Gelesen werden nur die ersten Bytes - das kostet auch bei vielen Belegen
+   * nichts Nennenswertes.
+   */
+  async istUnversehrt(monat: string, datei: BelegDatei): Promise<boolean> {
+    if (!/\.pdf$/i.test(datei.dateiname) && !/\.pdf$/i.test(datei.id)) return true;
+
+    let griff;
+    try {
+      griff = await open(await this.pfadFuer(monat, datei.id), 'r');
+      const puffer = Buffer.alloc(5);
+      const { bytesRead } = await griff.read(puffer, 0, 5, 0);
+      return bytesRead === 5 && puffer.toString('latin1') === '%PDF-';
+    } catch {
+      return false;
+    } finally {
+      await griff?.close();
+    }
   }
 
   async loesche(monat: string, dateiId: string): Promise<void> {

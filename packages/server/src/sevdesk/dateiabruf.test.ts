@@ -41,6 +41,132 @@ function jsonAntwort(koerper: unknown) {
   return rohAntwort(Buffer.from(text, 'utf8'), 'application/json; charset=utf-8');
 }
 
+describe('Belegdatei - base64 ohne Huelle', () => {
+  /*
+   * Zweiter Produktionsfehler an derselben Stelle: die Datei liess sich
+   * herunterladen, der PDF-Betrachter meldete aber "Datei kann nicht geoeffnet
+   * werden". Auf der Platte lag base64-TEXT statt eines PDF - sevDesk hatte
+   * ihn ohne JSON-Huelle und mit unauffaelligem Content-Type geschickt, und
+   * der Client hatte ihn ungeprueft durchgereicht.
+   */
+
+  const base64 = PDF.toString('base64');
+
+  it('dekodiert blanken base64-Text', async () => {
+    const fetchImpl = vi.fn(async () =>
+      rohAntwort(Buffer.from(base64, 'ascii'), 'text/plain'),
+    );
+
+    const datei = await baueClient(fetchImpl as unknown as typeof fetch)
+      .holeVoucherDatei('v-1');
+
+    expect(datei!.daten.subarray(0, 5).toString()).toBe('%PDF-');
+    expect(datei!.mimeType).toBe('application/pdf');
+  });
+
+  it('dekodiert base64 auch mit Zeilenumbruechen', async () => {
+    const umbrochen = base64.replace(/(.{20})/g, '$1\n');
+    const fetchImpl = vi.fn(async () =>
+      rohAntwort(Buffer.from(umbrochen, 'ascii'), 'application/octet-stream'),
+    );
+
+    const datei = await baueClient(fetchImpl as unknown as typeof fetch)
+      .holeVoucherDatei('v-1');
+
+    expect(datei!.daten.subarray(0, 5).toString()).toBe('%PDF-');
+  });
+
+  it('kommt mit einem blanken JSON-String zurecht', async () => {
+    const fetchImpl = vi.fn(async () =>
+      rohAntwort(Buffer.from(`"${base64}"`, 'ascii'), 'application/json'),
+    );
+
+    const datei = await baueClient(fetchImpl as unknown as typeof fetch)
+      .holeVoucherDatei('v-1');
+
+    expect(datei!.daten.subarray(0, 5).toString()).toBe('%PDF-');
+  });
+
+  it('kommt mit einer data-URL zurecht', async () => {
+    const fetchImpl = vi.fn(async () =>
+      rohAntwort(
+        Buffer.from(`data:application/pdf;base64,${base64}`, 'ascii'),
+        'text/plain',
+      ),
+    );
+
+    const datei = await baueClient(fetchImpl as unknown as typeof fetch)
+      .holeVoucherDatei('v-1');
+
+    expect(datei!.daten.subarray(0, 5).toString()).toBe('%PDF-');
+  });
+
+  it('macht aus lesbarem Text keinen Datenmuell', async () => {
+    // Wuerde blind dekodiert, entstuende Unsinn statt einer erkennbaren Datei.
+    const text = Buffer.from('Beleg konnte nicht erzeugt werden', 'ascii');
+    const fetchImpl = vi.fn(async () => rohAntwort(text, 'text/plain'));
+
+    const datei = await baueClient(fetchImpl as unknown as typeof fetch)
+      .holeVoucherDatei('v-1');
+
+    expect(datei!.daten.toString()).toBe('Beleg konnte nicht erzeugt werden');
+    expect(datei!.mimeType).toBe('text/plain');
+  });
+
+  it('laesst ein rohes PDF unangetastet, auch bei falschem Content-Type', async () => {
+    const fetchImpl = vi.fn(async () => rohAntwort(PDF, 'text/html'));
+
+    const datei = await baueClient(fetchImpl as unknown as typeof fetch)
+      .holeVoucherDatei('v-1');
+
+    expect(datei!.daten.equals(PDF)).toBe(true);
+    expect(datei!.mimeType).toBe('application/pdf');
+  });
+});
+
+describe('Belegdatei - JSON-Huelle', () => {
+  it('liest den Inhalt auch unter abweichendem Feldnamen', async () => {
+    for (const feld of ['content', 'base64', 'file', 'data']) {
+      const fetchImpl = vi.fn(async () =>
+        jsonAntwort({ objects: { [feld]: PDF.toString('base64') } }),
+      );
+
+      const datei = await baueClient(fetchImpl as unknown as typeof fetch)
+        .holeVoucherDatei('v-1');
+
+      expect(datei!.daten.subarray(0, 5).toString(), feld).toBe('%PDF-');
+    }
+  });
+
+  it('nimmt den Inhalt roh, wenn base64encoded false ist', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonAntwort({
+        objects: { content: PDF.toString('latin1'), base64encoded: false },
+      }),
+    );
+
+    const datei = await baueClient(fetchImpl as unknown as typeof fetch)
+      .holeVoucherDatei('v-1');
+
+    expect(datei!.daten.subarray(0, 5).toString()).toBe('%PDF-');
+  });
+
+  it('glaubt der Signatur mehr als dem gemeldeten Typ', async () => {
+    // sevDesk hat PDFs schon als image/jpeg ausgewiesen - im Browser blieb
+    // die Vorschau dann leer.
+    const fetchImpl = vi.fn(async () =>
+      jsonAntwort({
+        objects: { content: PDF.toString('base64'), mimeType: 'image/jpeg' },
+      }),
+    );
+
+    const datei = await baueClient(fetchImpl as unknown as typeof fetch)
+      .holeVoucherDatei('v-1');
+
+    expect(datei!.mimeType).toBe('application/pdf');
+  });
+});
+
 describe('Belegdatei - rohe Dateistroeme', () => {
   it('nimmt ein rohes PDF entgegen, statt daran zu scheitern', async () => {
     const fetchImpl = vi.fn(async () => rohAntwort(PDF, 'application/pdf'));

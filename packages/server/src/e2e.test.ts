@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
@@ -379,6 +379,23 @@ describe('End-to-End: gesamte Programmkette', () => {
       expect(monat.positionen[0]!.dateien).toHaveLength(0);
       expect(monat.positionen[0]!.status).toBe('offen');
       expect(monat.positionen[0]!.hinweis).toBeTruthy();
+    });
+
+    it('ersetzt eine unbrauchbar gespeicherte Datei', async () => {
+      // Der zweite Produktionsfall: die Datei war da, enthielt aber base64-Text
+      // statt eines PDF - herunterladbar, aber nicht zu oeffnen.
+      const vorher = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      const dateiId = vorher.positionen[0]!.dateien[0]!.id;
+      writeFileSync(
+        join(dataDir, 'monate', MONAT, dateiId),
+        (await testPdf(1)).toString('base64'),
+      );
+
+      const nachher = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      const res = await app.inject({
+        url: `/api/months/${MONAT}/files/${nachher.positionen[0]!.dateien[0]!.id}`,
+      });
+      expect(res.rawPayload.subarray(0, 5).toString()).toBe('%PDF-');
     });
 
     it('beantwortet eine fehlende Datei mit 404 statt mit einem Serverfehler', async () => {

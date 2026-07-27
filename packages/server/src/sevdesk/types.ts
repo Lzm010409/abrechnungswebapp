@@ -91,21 +91,25 @@ export interface Invoice {
   header?: string | null;
 }
 
-/** Antwort von GET /Voucher/{id}/getDocumentImage */
+/**
+ * Antwort der Datei-Endpunkte.
+ *
+ * Deckt GET /Voucher/{id}/getDocumentImage und GET /Invoice/{id}/getPdf ab.
+ * Der Inhalt taucht je nach Endpunkt unter verschiedenen Namen auf - deshalb
+ * stehen hier alle beobachteten Varianten; ausgewertet wird die erste
+ * vorhandene.
+ */
 export interface DokumentBild {
   /** Base64-kodierter Dateiinhalt */
   content?: string | null;
+  base64?: string | null;
+  file?: string | null;
+  data?: string | null;
   filename?: string | null;
   /** sevDesk liefert hier "true" als String, wenn content Base64 ist */
   base64encoded?: boolean | string | null;
   mimeType?: string | null;
 }
 
-/** Antwort von GET /Invoice/{id}/getPdf?download=false */
-export interface RechnungsPdf {
-  filename?: string | null;
-  /** Base64-kodiertes PDF */
-  content?: string | null;
-  base64encoded?: boolean | string | null;
-  mimeType?: string | null;
-}
+/** Gleiche Struktur, eigener Name fuer die Lesbarkeit an der Aufrufstelle. */
+export type RechnungsPdf = DokumentBild;
