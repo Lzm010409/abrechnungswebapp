@@ -2,9 +2,11 @@ import type {
   AblageErgebnis,
   Capabilities,
   LadeEreignis,
+  LadeFortschritt,
   Monat,
   MonatsReview,
   PositionsPatch,
+  VorgangsEreignis,
   ZuordnungsVorschlag,
 } from '@abrechnung/shared';
 
@@ -99,6 +101,71 @@ export async function leseLadeStream(
   }
 }
 
+/**
+ * Liest einen Vorgangs-Strom und liefert am Ende dessen Ergebnis.
+ *
+ * Dieselbe Mechanik wie beim Monatsladen, nur fuer Vorgaenge mit offenem
+ * Ergebnistyp: die KI-Funktionen dauern lange genug, dass die Oberflaeche
+ * zeigen sollte, woran gerade gearbeitet wird.
+ */
+export async function fuehreVorgangAus<T>(
+  pfad: string,
+  aufFortschritt: (fortschritt: LadeFortschritt) => void,
+  signal?: AbortSignal,
+): Promise<T> {
+  const res = await fetch(pfad, {
+    method: 'POST',
+    headers: { Accept: 'text/event-stream' },
+    signal,
+  });
+
+  if (!res.ok) {
+    let meldung = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { fehler?: string };
+      if (body.fehler) meldung = body.fehler;
+    } catch {
+      // kein JSON - Statuscode genuegt
+    }
+    throw new ApiFehler(meldung, res.status);
+  }
+  if (!res.body) throw new ApiFehler('Der Server liefert keinen Datenstrom.', 500);
+
+  const leser = res.body.getReader();
+  const dekoder = new TextDecoder();
+  let puffer = '';
+  let ergebnis: T | undefined;
+  let fehler: string | undefined;
+
+  for (;;) {
+    const { done, value } = await leser.read();
+    if (done) break;
+    puffer += dekoder.decode(value, { stream: true });
+
+    let ende = puffer.indexOf('\n\n');
+    while (ende >= 0) {
+      const block = puffer.slice(0, ende);
+      puffer = puffer.slice(ende + 2);
+
+      for (const zeile of block.split('\n')) {
+        if (!zeile.startsWith('data:')) continue;
+        const ereignis = JSON.parse(zeile.slice(5).trim()) as VorgangsEreignis;
+
+        if (ereignis.art === 'fortschritt') aufFortschritt(ereignis.fortschritt);
+        else if (ereignis.art === 'fertig') ergebnis = ereignis.ergebnis as T;
+        else fehler = ereignis.fehler;
+      }
+      ende = puffer.indexOf('\n\n');
+    }
+  }
+
+  if (fehler !== undefined) throw new ApiFehler(fehler, 500);
+  if (ergebnis === undefined) {
+    throw new ApiFehler('Der Vorgang endete ohne Ergebnis.', 500);
+  }
+  return ergebnis;
+}
+
 export const api = {
   capabilities: () => anfrage<Capabilities>('/api/capabilities'),
 
@@ -176,10 +243,11 @@ export const api = {
     ),
 
   ki: {
-    extrahiere: (monat: string) =>
-      anfrage<{ neuAnalysiert: number; monat: Monat }>(
-        `/api/months/${monat}/ai/extract`,
-        { method: 'POST' },
+    /** Liest die Belege aus und meldet dabei, welcher gerade drankommt. */
+    extrahiere: (monat: string, aufFortschritt: (f: LadeFortschritt) => void) =>
+      fuehreVorgangAus<{ neuAnalysiert: number; monat: Monat }>(
+        `/api/months/${monat}/ai/extract/stream`,
+        aufFortschritt,
       ),
 
     schlageZuordnungVor: (monat: string) =>
@@ -193,8 +261,11 @@ export const api = {
         { method: 'POST' },
       ),
 
-    pruefe: (monat: string) =>
-      anfrage<MonatsReview>(`/api/months/${monat}/ai/review`, { method: 'POST' }),
+    pruefe: (monat: string, aufFortschritt: (f: LadeFortschritt) => void) =>
+      fuehreVorgangAus<MonatsReview>(
+        `/api/months/${monat}/ai/review/stream`,
+        aufFortschritt,
+      ),
   },
 };
 

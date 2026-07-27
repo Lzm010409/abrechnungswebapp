@@ -35,6 +35,11 @@ export function App() {
   const [ablage, setAblage] = useState<AblageErgebnis>();
   /** Angehakte Zeilen fuer Sammelaktionen */
   const [markiert, setMarkiert] = useState<Set<string>>(new Set());
+  /** Laufender KI-Vorgang samt Fortschritt - undefined heisst: nichts laeuft */
+  const [vorgang, setVorgang] = useState<{
+    titel: string;
+    phasen: Map<LadePhase, LadeFortschritt>;
+  }>();
   const [meldung, setMeldung] = useState<string>();
   const [fehler, setFehler] = useState<string>();
   /** Bricht einen noch laufenden Lade-Stream ab, wenn der Monat wechselt. */
@@ -108,6 +113,35 @@ export function App() {
     void laden();
     return () => abbruch.current?.abort();
   }, [laden]);
+
+  /**
+   * Fuehrt einen laenger laufenden Vorgang aus und zeigt dabei, woran gerade
+   * gearbeitet wird. Ohne diese Anzeige sieht die Oberflaeche waehrend eines
+   * KI-Laufs aus, als sei sie stehengeblieben.
+   */
+  const mitVorgang = async <T,>(
+    titel: string,
+    arbeit: (melde: (f: LadeFortschritt) => void) => Promise<T>,
+    danach: (ergebnis: T) => void,
+  ) => {
+    setVorgang({ titel, phasen: new Map() });
+    setFehler(undefined);
+    setMeldung(undefined);
+    try {
+      const ergebnis = await arbeit((fortschritt) =>
+        setVorgang((alt) => {
+          const phasen = new Map(alt?.phasen);
+          phasen.set(fortschritt.phase, fortschritt);
+          return { titel, phasen };
+        }),
+      );
+      danach(ergebnis);
+    } catch (err) {
+      setFehler(err instanceof Error ? err.message : String(err));
+    } finally {
+      setVorgang(undefined);
+    }
+  };
 
   const mitLadeanzeige = async (arbeit: () => Promise<void>) => {
     setLaedt(true);
@@ -237,6 +271,16 @@ export function App() {
       <main>
         <div className="liste">
           {laedt && <Ladefortschritt phasen={phasen} laeuft={laedt} />}
+
+          {vorgang && (
+            <section className="vorgang">
+              <h4>
+                <span className="spinner" aria-hidden="true" />
+                {vorgang.titel}
+              </h4>
+              <Ladefortschritt phasen={vorgang.phasen} laeuft />
+            </section>
+          )}
           {daten && (
             <PositionenTabelle
               positionen={daten.positionen}
@@ -328,13 +372,20 @@ export function App() {
           <>
             <button
               className="ki"
-              disabled={laedt || !daten}
+              disabled={laedt || Boolean(vorgang) || !daten}
               onClick={() =>
-                mitLadeanzeige(async () => {
-                  const { neuAnalysiert, monat: neu } = await api.ki.extrahiere(monat);
-                  setDaten(neu);
-                  setMeldung(`${neuAnalysiert} Beleg(e) neu ausgelesen.`);
-                })
+                mitVorgang(
+                  'Belege werden ausgelesen',
+                  (melde) => api.ki.extrahiere(monat, melde),
+                  ({ neuAnalysiert, monat: neu }) => {
+                    setDaten(neu);
+                    setMeldung(
+                      neuAnalysiert === 0
+                        ? 'Alle Belege waren bereits ausgelesen.'
+                        : `${neuAnalysiert} Beleg(e) neu ausgelesen.`,
+                    );
+                  },
+                )
               }
             >
               Belege auslesen
@@ -342,11 +393,13 @@ export function App() {
 
             <button
               className="ki"
-              disabled={laedt || !daten}
+              disabled={laedt || Boolean(vorgang) || !daten}
               onClick={() =>
-                mitLadeanzeige(async () => {
-                  setReview(await api.ki.pruefe(monat));
-                })
+                mitVorgang(
+                  'Der Monat wird geprüft',
+                  (melde) => api.ki.pruefe(monat, melde),
+                  setReview,
+                )
               }
             >
               Monat prüfen

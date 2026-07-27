@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import {
   istGueltigerMonat,
   type Capabilities,
   type Kontoauszug,
   type LadeEreignis,
+  type LadeFortschritt,
+  type Monat,
   type SammelPatch,
+  type VorgangsEreignis,
 } from '@abrechnung/shared';
 import type { KiDienst } from '../ai/client.js';
 import type { Datenbank } from '../db/index.js';
@@ -65,6 +68,48 @@ function brauchtKi(ctx: RoutenKontext): KiDienst {
     throw fehler;
   }
   return ctx.ki;
+}
+
+/**
+ * Fuehrt einen laenger laufenden Vorgang aus und meldet den Fortschritt als
+ * Server-Sent Events.
+ *
+ * Dieselbe Form wie beim Monatsladen: die Oberflaeche soll waehrenddessen
+ * zeigen koennen, woran gearbeitet wird, statt nur einen Knopf auszugrauen.
+ */
+async function alsStrom(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  arbeit: (melde: (f: LadeFortschritt) => void) => Promise<unknown>,
+): Promise<void> {
+  reply.hijack();
+  reply.raw.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  let offen = true;
+  req.raw.on('close', () => {
+    offen = false;
+  });
+
+  const sende = (ereignis: VorgangsEreignis): void => {
+    if (!offen) return;
+    reply.raw.write(`data: ${JSON.stringify(ereignis)}\n\n`);
+  };
+
+  try {
+    const ergebnis = await arbeit((fortschritt) => sende({ art: 'fortschritt', fortschritt }));
+    sende({ art: 'fertig', ergebnis });
+  } catch (err) {
+    const meldung = err instanceof Error ? err.message : String(err);
+    req.log.error({ err: meldung }, 'Vorgang fehlgeschlagen');
+    sende({ art: 'fehler', fehler: meldung });
+  } finally {
+    if (offen) reply.raw.end();
+  }
 }
 
 export async function registriereRouten(
@@ -382,36 +427,71 @@ export async function registriereRouten(
   // KI - nur aktiv, wenn ANTHROPIC_API_KEY gesetzt ist
   // -------------------------------------------------------------------------
 
-  /** Liest die Belegdaten aller Dateien eines Monats, mit Cache je Datei. */
-  app.post<{ Params: { monat: string } }>(
-    '/api/months/:monat/ai/extract',
-    async (req) => {
-      const monat = pruefeMonat(req.params.monat);
-      const ki = brauchtKi(ctx);
-      const daten = await ctx.monate.lade(monat);
+  /**
+   * Liest die Belegdaten aller Dateien eines Monats, mit Cache je Datei.
+   *
+   * Jede Datei geht einzeln an das Modell - bei einem vollen Monat dauert das
+   * eine Weile. `melde` gibt den Stand nach aussen.
+   */
+  const leseBelegeAus = async (
+    monat: string,
+    melde: (f: LadeFortschritt) => void,
+  ): Promise<{ neuAnalysiert: number; monat: Monat }> => {
+    const ki = brauchtKi(ctx);
+    const daten = await ctx.monate.lade(monat);
 
-      let neu = 0;
-      for (const position of daten.positionen) {
-        const datei = position.dateien[0];
-        if (!datei || !datei.mimeType.includes('pdf')) continue;
+    const zuLesen = daten.positionen.filter(
+      (p) => p.dateien[0]?.mimeType.includes('pdf'),
+    );
 
-        // Der Cache haengt am Inhalts-Hash: dieselbe Datei wird nie zweimal
-        // an das Modell geschickt.
-        let extraktion = ctx.db.ladeExtraktion<
-          NonNullable<(typeof position)['extraktion']>
-        >(datei.id);
+    melde({
+      phase: 'ki-belege',
+      text: `${zuLesen.length} Belege werden gelesen`,
+      erledigt: 0,
+      gesamt: zuLesen.length,
+    });
 
-        if (!extraktion) {
-          const bytes = await ctx.ablage.lese(monat, datei.id);
-          extraktion = await ki.extrahiereBeleg(bytes, datei.dateiname);
-          ctx.db.speichereExtraktion(datei.id, extraktion);
-          neu++;
-        }
+    let neu = 0;
+    for (const [i, position] of zuLesen.entries()) {
+      const datei = position.dateien[0]!;
 
-        ctx.db.speichereOverride(monat, position.id, { extraktion });
+      // Der Cache haengt am Inhalts-Hash: dieselbe Datei wird nie zweimal
+      // an das Modell geschickt.
+      let extraktion = ctx.db.ladeExtraktion<
+        NonNullable<(typeof position)['extraktion']>
+      >(datei.id);
+
+      if (!extraktion) {
+        const bytes = await ctx.ablage.lese(monat, datei.id);
+        extraktion = await ki.extrahiereBeleg(bytes, datei.dateiname);
+        ctx.db.speichereExtraktion(datei.id, extraktion);
+        neu++;
       }
 
-      return { neuAnalysiert: neu, monat: await ctx.monate.lade(monat) };
+      ctx.db.speichereOverride(monat, position.id, { extraktion });
+
+      melde({
+        phase: 'ki-belege',
+        text: datei.dateiname,
+        erledigt: i + 1,
+        gesamt: zuLesen.length,
+      });
+    }
+
+    return { neuAnalysiert: neu, monat: await ctx.monate.lade(monat) };
+  };
+
+  app.post<{ Params: { monat: string } }>(
+    '/api/months/:monat/ai/extract',
+    async (req) => leseBelegeAus(pruefeMonat(req.params.monat), () => undefined),
+  );
+
+  /** Dasselbe mit laufender Rueckmeldung, welcher Beleg gerade drankommt. */
+  app.post<{ Params: { monat: string } }>(
+    '/api/months/:monat/ai/extract/stream',
+    async (req, reply) => {
+      const monat = pruefeMonat(req.params.monat);
+      return alsStrom(req, reply, (melde) => leseBelegeAus(monat, melde));
     },
   );
 
@@ -470,6 +550,32 @@ export async function registriereRouten(
     ctx.db.speichereReview(monat, review);
     return review;
   });
+
+  /**
+   * Die Pruefung ist ein einzelner Modellaufruf - zaehlbaren Fortschritt gibt
+   * es nicht. Gemeldet wird trotzdem, damit die Oberflaeche sagen kann, worauf
+   * gerade gewartet wird.
+   */
+  app.post<{ Params: { monat: string } }>(
+    '/api/months/:monat/ai/review/stream',
+    async (req, reply) => {
+      const monat = pruefeMonat(req.params.monat);
+
+      return alsStrom(req, reply, async (melde) => {
+        const ki = brauchtKi(ctx);
+        const daten = await ctx.monate.lade(monat);
+
+        melde({
+          phase: 'ki-pruefung',
+          text: `${daten.positionen.length} Buchungen werden auf Dubletten, Betragsabweichungen und Lücken geprüft`,
+        });
+
+        const review = await ki.pruefeMonat(monat, daten.positionen);
+        ctx.db.speichereReview(monat, review);
+        return review;
+      });
+    },
+  );
 
   app.get<{ Params: { monat: string } }>('/api/months/:monat/ai/review', async (req) => {
     const monat = pruefeMonat(req.params.monat);

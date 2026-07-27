@@ -259,6 +259,10 @@ export type LadePhase =
   | 'verknuepfung'
   /** Die Belegdateien selbst (langsamster Teil) */
   | 'dateien'
+  /** KI liest die Belege aus */
+  | 'ki-belege'
+  /** KI prueft den fertigen Monat */
+  | 'ki-pruefung'
   | 'fertig';
 
 export interface LadeFortschritt {
@@ -269,6 +273,17 @@ export interface LadeFortschritt {
   erledigt?: number;
   gesamt?: number;
 }
+
+/**
+ * Ereignisse eines beliebigen laufenden Vorgangs.
+ *
+ * Dieselbe Form wie beim Monatsladen, nur mit offenem Ergebnis - die
+ * KI-Funktionen liefern keinen Monat, sondern ihre eigene Auswertung.
+ */
+export type VorgangsEreignis =
+  | { art: 'fortschritt'; fortschritt: LadeFortschritt }
+  | { art: 'fertig'; ergebnis: unknown }
+  | { art: 'fehler'; fehler: string };
 
 /** Ereignisse des Lade-Streams (Server-Sent Events). */
 export type LadeEreignis =

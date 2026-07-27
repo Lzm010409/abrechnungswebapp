@@ -4,7 +4,14 @@ import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { PDFDocument } from 'pdf-lib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { LadeEreignis, Monat, MonatsStatus } from '@abrechnung/shared';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import type {
+  LadeEreignis,
+  Monat,
+  MonatsStatus,
+  VorgangsEreignis,
+} from '@abrechnung/shared';
 import { baueApp } from './app.js';
 import type { Config } from './config.js';
 import type { Datenbank } from './db/index.js';
@@ -42,6 +49,15 @@ function tx(
     checkAccount: { id: 'konto-1', objectName: 'CheckAccount' },
     ...teil,
   };
+}
+
+/** Wie leseEreignisse, nur fuer Vorgaenge mit offenem Ergebnistyp. */
+function leseVorgang(rohtext: string): VorgangsEreignis[] {
+  return rohtext
+    .split('\n\n')
+    .flatMap((block) => block.split('\n'))
+    .filter((zeile) => zeile.startsWith('data:'))
+    .map((zeile) => JSON.parse(zeile.slice(5).trim()) as VorgangsEreignis);
 }
 
 /** Zerlegt eine Server-Sent-Events-Antwort in die einzelnen Ereignisse. */
@@ -1257,6 +1273,123 @@ describe('End-to-End: gesamte Programmkette', () => {
       const doc = await PDFDocument.load(res.rawPayload);
       // Deckblatt + Journal + nur noch die Rechnung(1)
       expect(doc.getPageCount()).toBe(3);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  describe('KI-Vorgaenge mit Fortschritt', () => {
+    /*
+     * Belege auslesen dauert pro Datei einen Modellaufruf. Ohne Rueckmeldung
+     * sieht die Oberflaeche waehrenddessen aus, als sei sie stehengeblieben -
+     * deshalb laufen beide KI-Funktionen als Ereignisstrom.
+     */
+
+    let claude: Server;
+    let claudeUrl: string;
+    let anfragen: number;
+
+    beforeEach(async () => {
+      anfragen = 0;
+      claude = createServer((_req, res) => {
+        anfragen++;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-opus-5',
+            content: [{ type: 'text', text: '{"betrag":119,"aussteller":"Telekom"}' }],
+            stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+        );
+      });
+      await new Promise<void>((f) => claude.listen(0, '127.0.0.1', f));
+      claudeUrl = `http://127.0.0.1:${(claude.address() as AddressInfo).port}`;
+
+      const daten = basisDaten();
+      for (const [i, id] of ['v-1', 'v-2'].entries()) {
+        daten.transaktionen.push(tx({ id: `tx-${i}`, amount: '-119.00' }));
+        daten.vouchers.push({ id, objectName: 'Voucher', status: '1000', sumGross: '119.00' });
+        daten.voucherTransaktionen[id] = [`tx-${i}`];
+        daten.voucherDateien[id] = await testPdf(1, id);
+      }
+
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp({
+        anthropic: {
+          apiKey: 'test', modell: 'claude-opus-5', effort: 'low', baseUrl: claudeUrl,
+        },
+      });
+    });
+
+    afterEach(() => new Promise<void>((f) => claude.close(() => f())));
+
+    it('meldet beim Auslesen jeden Beleg einzeln', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/months/${MONAT}/ai/extract/stream`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toContain('text/event-stream');
+
+      const ereignisse = leseVorgang(res.payload);
+      const staende = ereignisse
+        .filter((e) => e.art === 'fortschritt')
+        .map((e) => (e.art === 'fortschritt' ? e.fortschritt : undefined)!);
+
+      // Ankuendigung plus je ein Stand nach jedem Beleg.
+      expect(staende[0]).toMatchObject({ phase: 'ki-belege', erledigt: 0, gesamt: 2 });
+      expect(staende.at(-1)).toMatchObject({ erledigt: 2, gesamt: 2 });
+
+      const letztes = ereignisse.at(-1)!;
+      expect(letztes.art).toBe('fertig');
+      expect((letztes as { ergebnis: { neuAnalysiert: number } }).ergebnis.neuAnalysiert).toBe(2);
+    });
+
+    it('schickt dieselbe Datei kein zweites Mal an das Modell', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      await app.inject({ method: 'POST', url: `/api/months/${MONAT}/ai/extract/stream` });
+      const nachErstem = anfragen;
+
+      await app.inject({ method: 'POST', url: `/api/months/${MONAT}/ai/extract/stream` });
+      expect(anfragen).toBe(nachErstem);
+    });
+
+    it('meldet bei der Pruefung, worauf gewartet wird', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+
+      const ereignisse = leseVorgang(
+        (
+          await app.inject({
+            method: 'POST',
+            url: `/api/months/${MONAT}/ai/review/stream`,
+          })
+        ).payload,
+      );
+
+      const erstes = ereignisse[0]!;
+      expect(erstes.art).toBe('fortschritt');
+      expect((erstes as { fortschritt: { phase: string } }).fortschritt.phase).toBe(
+        'ki-pruefung',
+      );
+      expect(ereignisse.at(-1)!.art).toBe('fertig');
+    });
+
+    it('meldet einen Ausfall als Ereignis, nicht als Abbruch', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      await new Promise<void>((f) => claude.close(() => f()));
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/months/${MONAT}/ai/review/stream`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(leseVorgang(res.payload).at(-1)!.art).toBe('fehler');
+      // Damit afterEach nicht ueber den geschlossenen Server stolpert
+      claude = createServer();
     });
   });
 

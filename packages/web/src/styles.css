@@ -492,3 +492,37 @@ code { background: #f1f3f5; padding: 1px 4px; border-radius: 3px; font-size: 12p
 .positionen tbody tr.markiert.aktiv { background: #dbeafe; }
 
 .marke.umbuchung { background: #e7f3ee; color: #1e6b4a; }
+
+/* -- Laufender Vorgang (KI) -------------------------------------------- */
+
+.vorgang {
+  margin-top: 16px;
+  background: var(--flaeche);
+  border: 1px solid var(--rahmen);
+  border-radius: 8px;
+  padding: 4px 6px 10px;
+}
+
+.vorgang h4 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 0 14px;
+  font-size: 13px;
+}
+
+.vorgang .fortschritt { padding: 6px 14px 0; }
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--rahmen);
+  border-top-color: var(--akzent);
+  border-radius: 50%;
+  animation: drehen 0.8s linear infinite;
+  flex: none;
+}
+
+@keyframes drehen {
+  to { transform: rotate(360deg); }
+}

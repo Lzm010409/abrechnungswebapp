@@ -367,6 +367,18 @@ Tages erst AUSGANG, dann EINGANG.
 Optional, Modell `claude-opus-5`. Das Modell entscheidet ausschließlich
 Zweifelsfälle — Beträge, Verknüpfungen und Summen kommen aus sevDesk.
 
+Beide länger laufenden Funktionen melden ihren Fortschritt als Ereignisstrom,
+genau wie das Monatsladen — beim Auslesen mit Zähler („Beleg 7 von 26" samt
+Dateiname), bei der Prüfung mit Spinner und der Angabe, worauf gewartet wird:
+
+```
+POST /api/months/2026-06/ai/extract/stream
+POST /api/months/2026-06/ai/review/stream
+```
+
+Die Endpunkte ohne `/stream` gibt es weiterhin; sie liefern dasselbe in einer
+Antwort.
+
 | Funktion | Wo | Was |
 |---|---|---|
 | Belege auslesen | Aktionsleiste | PDF direkt an das Modell, kein OCR. Ergebnis pro Datei-Hash gecacht |
@@ -382,7 +394,7 @@ Zweifelsfälle — Beträge, Verknüpfungen und Summen kommen aus sevDesk.
 npm test
 ```
 
-299 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+303 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 

@@ -15,6 +15,8 @@ const REIHENFOLGE: LadePhase[] = [
   'belege',
   'verknuepfung',
   'dateien',
+  'ki-belege',
+  'ki-pruefung',
   'fertig',
 ];
 
@@ -24,6 +26,8 @@ const TITEL: Record<LadePhase, string> = {
   belege: 'Belege und Ausgangsrechnungen',
   verknuepfung: 'Zuordnung Buchung → Beleg',
   dateien: 'Belegdateien',
+  'ki-belege': 'Belege werden gelesen',
+  'ki-pruefung': 'Monat wird geprüft',
   fertig: 'Fertig',
 };
 
