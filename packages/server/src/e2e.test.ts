@@ -508,6 +508,75 @@ describe('End-to-End: gesamte Programmkette', () => {
 
   // -------------------------------------------------------------------------
 
+  describe('Ablageordner an der Buchung', () => {
+    const finde = (monat: Monat, id: string) => monat.positionen.find((p) => p.id === id)!;
+
+    beforeEach(async () => {
+      const daten = basisDaten();
+      daten.transaktionen.push(
+        tx({ id: 'tx-ordner', amount: '-42.00', paymtPurpose: 'Werkstatt Meier' }),
+      );
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp();
+    });
+
+    it('merkt sich den Ordner und nimmt ihn wieder zurueck', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+
+      let monat = (
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/months/${MONAT}/positions/tx-ordner`,
+          payload: { ablageordner: 'Tanken' },
+        })
+      ).json<Monat>();
+      expect(finde(monat, 'tx-ordner').ablageordner).toBe('Tanken');
+
+      // Neu laden darf die Handeinstellung nicht wegwerfen.
+      monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      expect(finde(monat, 'tx-ordner').ablageordner).toBe('Tanken');
+
+      monat = (
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/months/${MONAT}/positions/tx-ordner`,
+          payload: { ablageordner: null },
+        })
+      ).json<Monat>();
+      expect(finde(monat, 'tx-ordner').ablageordner).toBeUndefined();
+    });
+
+    it('weist einen unbekannten Ordner ab, statt ihn zu uebernehmen', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/api/months/${MONAT}/positions/tx-ordner`,
+        payload: { ablageordner: 'Papierkorb' },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().fehler).toContain('Konto, Bar, Tanken');
+    });
+
+    it('setzt den Ordner fuer mehrere Buchungen auf einmal', async () => {
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      const ids = monat.positionen.map((p) => p.id);
+
+      const danach = (
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/months/${MONAT}/positions`,
+          payload: { positionIds: ids, patch: { ablageordner: 'Bar' } },
+        })
+      ).json<Monat>();
+
+      expect(danach.positionen.every((p) => p.ablageordner === 'Bar')).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
   describe('POST ohne Koerper', () => {
     /*
      * Die Oberflaeche schickte bei Aufrufen ohne Daten trotzdem

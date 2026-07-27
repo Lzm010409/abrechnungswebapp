@@ -115,6 +115,39 @@ describe('Einteilung auf die Ordner', () => {
     expect(ergebnis.ohneBeleg).toBe(1);
   });
 
+  it('nimmt den an der Buchung gesetzten Ordner, nicht den der Regel', async () => {
+    // Die Buchung steht auf dem Auszug, waere also Konto. Von Hand gesetzt
+    // schlaegt das - genau dafuer ist die Einstellung da.
+    const auszug = await auszugMitText(['02.06.2026 Telekom 100,00']);
+    const ablage = new OneDriveAblage({}, { ladeDatei: async () => auszug });
+
+    const ergebnis = await ablage.lege(
+      monat({
+        positionen: [
+          pos({ id: 'a', verwendungszweck: 'Telekom', betrag: -100, ablageordner: 'Tanken' }),
+        ],
+        kontoauszuege: [
+          { id: 'ka1', dateiname: 'A.pdf', groesse: 1, hochgeladenAm: '2026-07-01T00:00:00Z' },
+        ],
+      }),
+    );
+
+    expect(ergebnis.eintraege[0]!.ordner).toBe('Tanken');
+    expect(ergebnis.eintraege[0]!.vonHand).toBe(true);
+    expect(ergebnis.eintraege[0]!.begruendung).toContain('von Hand');
+  });
+
+  it('faellt ohne gesetzten Ordner auf die Regel zurueck', async () => {
+    const ablage = new OneDriveAblage({}, { ladeDatei: async () => Buffer.alloc(0) });
+
+    const ergebnis = await ablage.lege(
+      monat({ positionen: [pos({ id: 'a', verwendungszweck: 'ARAL TANKSTELLE' })] }),
+    );
+
+    expect(ergebnis.eintraege[0]!.ordner).toBe('Tanken');
+    expect(ergebnis.eintraege[0]!.vonHand).toBeUndefined();
+  });
+
   it('bleibt ohne konfigurierte Webhooks bei der Vorschau', async () => {
     const ablage = new OneDriveAblage({}, { ladeDatei: async () => Buffer.alloc(0) });
     const ergebnis = await ablage.lege(monat({ positionen: [pos({ id: 'a' })] }));

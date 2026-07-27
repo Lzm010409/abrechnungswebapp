@@ -131,6 +131,14 @@ export function PositionenTabelle({
                     {MARKEN_TEXT[p.markierung]}
                   </span>
                 )}
+                {p.ablageordner && p.dateien.length > 0 && (
+                  <span
+                    className="marke ablageordner"
+                    title={`Beleg wird nach ${p.ablageordner} abgelegt – von Hand gesetzt`}
+                  >
+                    → {p.ablageordner}
+                  </span>
+                )}
                 {p.sevdeskStatus === 'offen' && !p.markierung && (
                   <span
                     className="marke sevdesk-offen"

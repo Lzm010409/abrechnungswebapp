@@ -1,4 +1,6 @@
 import {
+  ABLAGEORDNER,
+  istAblageordner,
   monatsGrenzen,
   type BelegDatei,
   type LadeFortschritt,
@@ -576,6 +578,17 @@ function baueTeilPatch(position: Position, patch: PositionsPatch): Partial<Posit
 
   if (patch.markierung !== undefined) {
     teil.markierung = patch.markierung ?? undefined;
+  }
+
+  if (patch.ablageordner !== undefined) {
+    if (patch.ablageordner !== null && !istAblageordner(patch.ablageordner)) {
+      throw new EingabeFehler(
+        `"${String(patch.ablageordner)}" ist kein Ablageordner. ` +
+          `Erlaubt: ${ABLAGEORDNER.join(', ')}.`,
+      );
+    }
+    // null nimmt die Handeinstellung zurueck - dann greift wieder die Automatik.
+    teil.ablageordner = patch.ablageordner ?? undefined;
   }
 
   if (patch.status !== undefined) teil.status = patch.status;

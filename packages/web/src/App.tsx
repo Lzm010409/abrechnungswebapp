@@ -262,6 +262,12 @@ export function App() {
               setMarkiert(new Set());
             })
           }
+          onOrdner={(ablageordner) =>
+            mitLadeanzeige(async () => {
+              setDaten(await api.patcheMehrere(monat, [...markiert], { ablageordner }));
+              setMarkiert(new Set());
+            })
+          }
           onAusblenden={() =>
             mitLadeanzeige(async () => {
               setDaten(

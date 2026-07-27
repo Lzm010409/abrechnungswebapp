@@ -493,6 +493,10 @@ code { background: #f1f3f5; padding: 1px 4px; border-radius: 3px; font-size: 12p
 
 .marke.umbuchung { background: #e7f3ee; color: #1e6b4a; }
 
+/* Von Hand gesetzter Zielordner - bewusst blass, es ist eine Notiz zur
+   Ablage und kein Zustand der Buchung selbst. */
+.marke.ablageordner { background: #f0f0ee; color: #55534d; }
+
 /* -- Laufender Vorgang (KI) -------------------------------------------- */
 
 .vorgang {

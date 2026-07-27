@@ -518,6 +518,30 @@ Warum erst am Schluss: die Einteilung hängt daran, welche Buchung sich auf
 einer Auszugsseite wiederfindet — dieselbe Zuordnung, die auch die Reihenfolge
 im PDF bestimmt. Vorher steht sie schlicht nicht fest.
 
+### Ordner von Hand festlegen
+
+Die Regel ist eine Heuristik und liegt gelegentlich daneben — eine Tankstelle,
+die nicht in der Markenliste steht, oder eine Barzahlung, die zufällig auf
+einer Auszugsseite auftaucht. Deshalb lässt sich der Zielordner **direkt an der
+Buchung** einstellen:
+
+- im Detailbereich unter **Ablageordner** — `Konto`, `Bar`, `Tanken`; ein
+  erneuter Klick auf den gewählten Ordner (oder *wieder automatisch*) gibt die
+  Buchung der Regel zurück
+- über die Sammelleiste für alle angehakten Buchungen auf einmal
+
+Ein gesetzter Ordner **sticht die Regel** — die Automatik greift nur, solange
+nichts eingestellt ist. In der Tabelle steht der Ordner als blasse Marke (`→
+Tanken`) an der Zeile, in der Ablagevorschau als `· von Hand` hinter dem
+Dateinamen. Die Einstellung überlebt das Neuladen aus sevDesk, wie jede andere
+manuelle Korrektur auch.
+
+```
+PATCH /api/months/2026-06/positions/tx-42   { "ablageordner": "Tanken" }
+PATCH /api/months/2026-06/positions/tx-42   { "ablageordner": null }      → wieder automatisch
+PATCH /api/months/2026-06/positions         { "positionIds": [...], "patch": { "ablageordner": "Bar" } }
+```
+
 **Verschoben wird nichts von allein.** Nach dem PDF erscheint eine Vorschau mit
 der Einteilung; erst ein Klick legt die Dateien ab. Ohne die beiden Webhooks
 bleibt es bei der Vorschau — die ist auch ohne OneDrive nützlich.

@@ -1,4 +1,4 @@
-import type { Markierung } from '@abrechnung/shared';
+import { ABLAGEORDNER, type Ablageordner, type Markierung } from '@abrechnung/shared';
 
 /**
  * Leiste fuer die angehakten Buchungen.
@@ -18,6 +18,7 @@ interface Props {
   anzahl: number;
   laedt: boolean;
   onMarkieren: (markierung: Markierung | null) => void;
+  onOrdner: (ordner: Ablageordner | null) => void;
   onAusblenden: () => void;
   onAufheben: () => void;
 }
@@ -26,6 +27,7 @@ export function Sammelaktionen({
   anzahl,
   laedt,
   onMarkieren,
+  onOrdner,
   onAusblenden,
   onAufheben,
 }: Props) {
@@ -44,6 +46,19 @@ export function Sammelaktionen({
 
       <button disabled={laedt} onClick={() => onMarkieren(null)}>
         Markierung entfernen
+      </button>
+
+      <span className="trenner" />
+
+      <span className="grau klein">Belege ablegen nach:</span>
+      {ABLAGEORDNER.map((ordner) => (
+        <button key={ordner} disabled={laedt} onClick={() => onOrdner(ordner)}>
+          {ordner}
+        </button>
+      ))}
+
+      <button disabled={laedt} onClick={() => onOrdner(null)}>
+        wieder automatisch
       </button>
 
       <span className="trenner" />

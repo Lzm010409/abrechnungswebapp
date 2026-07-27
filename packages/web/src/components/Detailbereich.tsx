@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Capabilities, Monat, Position } from '@abrechnung/shared';
+import { ABLAGEORDNER, type Capabilities, type Monat, type Position } from '@abrechnung/shared';
 import { api, deutschesDatum, euro } from '../api/client';
 
 /**
@@ -235,6 +235,53 @@ export function Detailbereich({
             </button>
           ))}
         </div>
+      </section>
+
+      {/* -- Zielordner der Belegablage -- */}
+      <section>
+        <h4>Ablageordner</h4>
+        <p className="klein grau">
+          Normalerweise entscheidet die Regel: was auf dem Kontoauszug steht, geht nach
+          Konto, von den übrigen die Tankbelege nach Tanken, der Rest nach Bar. Hier
+          lässt sich der Ordner für diese Buchung festlegen — dann gilt er.
+        </p>
+        <div className="markierungen">
+          {ABLAGEORDNER.map((ordner) => (
+            <button
+              key={ordner}
+              className={position.ablageordner === ordner ? 'gewaehlt' : ''}
+              disabled={laedt}
+              onClick={() =>
+                fuehreAus(() =>
+                  api.patchePosition(monat, position.id, {
+                    // Nochmal klicken gibt die Buchung der Automatik zurueck.
+                    ablageordner: position.ablageordner === ordner ? null : ordner,
+                  }),
+                )
+              }
+            >
+              {ordner}
+            </button>
+          ))}
+          {position.ablageordner && (
+            <button
+              className="verweis"
+              disabled={laedt}
+              onClick={() =>
+                fuehreAus(() =>
+                  api.patchePosition(monat, position.id, { ablageordner: null }),
+                )
+              }
+            >
+              wieder automatisch
+            </button>
+          )}
+        </div>
+        {position.dateien.length === 0 && (
+          <p className="klein grau">
+            Zu dieser Buchung liegt kein Beleg — abgelegt wird also nichts.
+          </p>
+        )}
       </section>
 
       {/* -- Aktenzeichen -- */}

@@ -56,6 +56,7 @@ export function Ablagevorschau({ ergebnis, onAusfuehren, onSchliessen, laedt }: 
                 {eintraege.map((e) => (
                   <li key={e.dateiId} className={e.fehler ? 'fehler' : ''}>
                     <span title={e.begruendung}>{e.dateiname}</span>
+                    {e.vonHand && <span className="grau klein"> · von Hand</span>}
                     {e.fehler && <span className="klein"> — {e.fehler}</span>}
                   </li>
                 ))}

@@ -175,6 +175,16 @@ export interface Position {
   /** Setzt die Belegpflicht aus - siehe Markierung */
   markierung?: Markierung;
 
+  /**
+   * Von Hand gesetzter Zielordner der Belegablage.
+   *
+   * Ist er gesetzt, gilt er - die automatische Einteilung wird uebergangen.
+   * Gedacht fuer die Faelle, in denen die Regel danebenliegt: eine Tankstelle,
+   * die nicht in der Markenliste steht, oder eine Barzahlung, die zufaellig
+   * auf einer Auszugsseite auftaucht.
+   */
+  ablageordner?: Ablageordner;
+
   extraktion?: BelegExtraktion;
   status: PositionsStatus;
   /** Klartext-Begruendung fuer den Status, wird in der UI als Tooltip gezeigt */
@@ -310,6 +320,13 @@ export type LadeEreignis =
  */
 export type Ablageordner = 'Konto' | 'Bar' | 'Tanken';
 
+/** Alle Zielordner in Anzeigereihenfolge - auch zur Pruefung von Eingaben. */
+export const ABLAGEORDNER: readonly Ablageordner[] = ['Konto', 'Bar', 'Tanken'];
+
+export function istAblageordner(wert: unknown): wert is Ablageordner {
+  return typeof wert === 'string' && (ABLAGEORDNER as readonly string[]).includes(wert);
+}
+
 /** Was mit einem einzelnen Beleg bei der Ablage geschehen ist bzw. soll. */
 export interface AblageEintrag {
   positionId: string;
@@ -318,6 +335,8 @@ export interface AblageEintrag {
   ordner: Ablageordner;
   /** Kurze Begruendung der Einordnung, fuer die Anzeige */
   begruendung: string;
+  /** true, wenn der Ordner an der Buchung von Hand gesetzt wurde */
+  vonHand?: boolean;
   /** Fehlermeldung, wenn die Ablage fehlschlug */
   fehler?: string;
 }
@@ -396,6 +415,8 @@ export interface PositionsPatch {
   status?: PositionsStatus;
   /** null entfernt die Markierung wieder */
   markierung?: Markierung | null;
+  /** Zielordner der Belegablage; null gibt die Buchung der Automatik zurueck */
+  ablageordner?: Ablageordner | null;
   hinweis?: string | null;
   /** IDs aus `kandidaten`, die nach `dateien` uebernommen werden sollen */
   dateiIds?: string[];

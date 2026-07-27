@@ -121,6 +121,9 @@ export class OneDriveAblage {
    * Konto ergibt sich aus derselben Seitenzuordnung, die auch die Reihenfolge
    * im Abrechnungs-PDF bestimmt - beides muss zusammenpassen, sonst liegt ein
    * Beleg in Bar, obwohl er im PDF hinter einer Auszugsseite steht.
+   *
+   * Ist an der Buchung ein Ordner von Hand gesetzt, gilt dieser. Die Regel ist
+   * eine Heuristik; sie soll die Handeinstellung nicht ueberstimmen.
    */
   private async teileEin(monat: Monat): Promise<AblageEintrag[]> {
     const relevant = monat.positionen.filter(
@@ -132,7 +135,10 @@ export class OneDriveAblage {
 
     for (const position of relevant) {
       const treffer = aufAuszug.has(position.id);
-      const ordner = bestimmeOrdner(position, treffer);
+      // Ein an der Buchung gesetzter Ordner sticht die Regel - der Mensch hat
+      // den Beleg gesehen, die Heuristik nur den Verwendungszweck.
+      const vonHand = position.ablageordner !== undefined;
+      const ordner = position.ablageordner ?? bestimmeOrdner(position, treffer);
 
       for (const datei of position.dateien) {
         eintraege.push({
@@ -140,7 +146,10 @@ export class OneDriveAblage {
           dateiId: datei.id,
           dateiname: datei.dateiname,
           ordner,
-          begruendung: begruende(ordner, treffer, position),
+          begruendung: vonHand
+            ? 'an der Buchung von Hand gesetzt'
+            : begruende(ordner, treffer, position),
+          ...(vonHand ? { vonHand: true } : {}),
         });
       }
     }
