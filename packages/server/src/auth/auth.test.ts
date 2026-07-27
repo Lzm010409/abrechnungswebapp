@@ -6,7 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { exportJWK, generateKeyPair, SignJWT, type JWK, type KeyLike } from 'jose';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { baueApp } from '../app.js';
+import { baueApp, entferneGeheimnisse } from '../app.js';
 import type { Config } from '../config.js';
 import type { Datenbank } from '../db/index.js';
 import { starteMockSevDesk, type MockSevDesk } from '../testhilfen/mockSevdesk.js';
@@ -152,6 +152,38 @@ describe('Ohne Anmeldung ist die API dicht', () => {
     await starte(auth);
     const res = await app.inject({ url: '/auth/me' });
     expect(res.json()).toMatchObject({ angemeldet: false, anmeldungAktiv: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('Geheimnisse im Log', () => {
+  // Fastify protokolliert die vollstaendige URL. Der Rueckweg der Anmeldung
+  // traegt den Autorisierungscode in der Query - der darf dort nicht landen.
+
+  it('entfernt Code und State aus der protokollierten URL', () => {
+    const bereinigt = entferneGeheimnisse(
+      '/auth/callback?code=1.AVwAhXd4geheim&state=SFtEKjFECwP4&session_state=003fa8fa',
+    );
+    expect(bereinigt).not.toContain('geheim');
+    expect(bereinigt).not.toContain('SFtEKjFECwP4');
+    expect(bereinigt).not.toContain('003fa8fa');
+    // Der Pfad muss lesbar bleiben, sonst taugen die Logs nicht mehr.
+    expect(bereinigt.startsWith('/auth/callback?')).toBe(true);
+  });
+
+  it('laesst harmlose Parameter unangetastet', () => {
+    expect(entferneGeheimnisse('/api/months/2026-06/stream?refresh=true')).toBe(
+      '/api/months/2026-06/stream?refresh=true',
+    );
+    expect(entferneGeheimnisse('/api/months/2026-06')).toBe('/api/months/2026-06');
+  });
+
+  it('behaelt die Fehlermeldung von Entra, die keine ist', () => {
+    const bereinigt = entferneGeheimnisse(
+      '/auth/callback?error=access_denied&error_description=Zugriff+verweigert',
+    );
+    expect(bereinigt).toContain('access_denied');
   });
 });
 

@@ -19,6 +19,29 @@ export interface AppInstanz {
   db: Datenbank;
 }
 
+/** Parameter, die als Klartext im Log nichts zu suchen haben. */
+const GEHEIME_PARAMETER = ['code', 'state', 'session_state', 'id_token', 'code_verifier'];
+
+/**
+ * Ersetzt die Werte sicherheitsrelevanter Query-Parameter durch einen Platzhalter.
+ * Der Pfad bleibt lesbar, damit die Logs weiter zur Fehlersuche taugen.
+ */
+export function entferneGeheimnisse(url: string): string {
+  const trenner = url.indexOf('?');
+  if (trenner < 0) return url;
+
+  const parameter = new URLSearchParams(url.slice(trenner + 1));
+  let veraendert = false;
+  for (const name of GEHEIME_PARAMETER) {
+    if (parameter.has(name)) {
+      parameter.set(name, '[entfernt]');
+      veraendert = true;
+    }
+  }
+  if (!veraendert) return url;
+  return `${url.slice(0, trenner)}?${parameter.toString()}`;
+}
+
 /**
  * Baut die vollstaendige Anwendung. Getrennt vom Bootstrap in index.ts, damit
  * Integrationstests dieselbe Instanz per app.inject() ansprechen koennen wie
@@ -28,6 +51,17 @@ export async function baueApp(config: Config): Promise<AppInstanz> {
   const app = Fastify({
     logger: {
       level: config.logLevel,
+      serializers: {
+        // Fastify protokolliert die vollstaendige URL. Auf dem Rueckweg der
+        // Anmeldung steht dort der Autorisierungscode - der gehoert nicht in
+        // ein Log, das Betreiber und Weiterleitungen zu sehen bekommen.
+        req: (req) => ({
+          method: req.method,
+          url: entferneGeheimnisse(req.url),
+          host: req.headers?.host,
+          remoteAddress: req.socket?.remoteAddress,
+        }),
+      },
       ...(process.env.NODE_ENV === 'development'
         ? { transport: { target: 'pino-pretty' } }
         : {}),
