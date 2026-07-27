@@ -22,6 +22,8 @@ export interface Config {
   port: number;
   logLevel: string;
   dataDir: string;
+  /** Gebautes Frontend. Ohne Angabe packages/web/dist relativ zum Startpfad. */
+  webDist?: string;
 
   sevdesk: {
     token: string;

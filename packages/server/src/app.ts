@@ -130,13 +130,50 @@ export async function baueApp(config: Config): Promise<AppInstanz> {
   });
 
   // Gebautes Frontend ausliefern, sofern vorhanden (Produktion / Docker).
-  const webDist = join(process.cwd(), 'packages/web/dist');
+  const webDist = config.webDist ?? join(process.cwd(), 'packages/web/dist');
   if (existsSync(webDist)) {
-    await app.register(fastifyStatic, { root: webDist });
+    await app.register(fastifyStatic, {
+      root: webDist,
+      /*
+       * Die Dateien unter /assets tragen den Inhalts-Hash im Namen und duerfen
+       * deshalb beliebig lange im Browser liegen. Die index.html darf das
+       * gerade nicht: sie verweist auf genau diese Hashes. Bleibt eine alte
+       * Fassung im Cache, fordert der Browser nach einem Deploy Dateien an, die
+       * es nicht mehr gibt - und die Anwendung startet nicht mehr.
+       */
+      // Die eigene Steuerung abschalten, sonst ueberschreibt sie setHeaders.
+      cacheControl: false,
+      setHeaders: (res, pfad) => {
+        if (pfad.endsWith('index.html')) {
+          res.setHeader('Cache-Control', 'no-store, must-revalidate');
+        } else if (pfad.includes('/assets/')) {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        } else {
+          res.setHeader('Cache-Control', 'public, max-age=300');
+        }
+      },
+    });
+
     app.setNotFoundHandler((req, reply) => {
-      if (req.url.startsWith('/api/')) {
+      const pfad = req.url.split('?')[0] ?? '';
+
+      if (pfad.startsWith('/api/')) {
         return reply.status(404).send({ fehler: 'Unbekannter API-Endpunkt' });
       }
+
+      /*
+       * Eine fehlende Datei darf niemals die index.html zurueckbekommen. Der
+       * Browser laedt sie sonst als Modul, bricht mit einem MIME-Fehler ab und
+       * die eigentliche Ursache - eine veraltete Datei wurde angefragt - bleibt
+       * unsichtbar. Ein ehrlicher 404 sagt genau das.
+       */
+      if (pfad.startsWith('/assets/') || /\.[a-z0-9]+$/i.test(pfad)) {
+        return reply
+          .status(404)
+          .send({ fehler: `${pfad} gehoert nicht zu dieser Fassung der Anwendung.` });
+      }
+
+      // Alles Uebrige ist eine Route des Frontends.
       return reply.sendFile('index.html');
     });
   }
