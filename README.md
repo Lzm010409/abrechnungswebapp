@@ -345,7 +345,7 @@ Zweifelsfälle — Beträge, Verknüpfungen und Summen kommen aus sevDesk.
 npm test
 ```
 
-248 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+259 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 
@@ -416,10 +416,22 @@ Nach Abschluss der Zuordnung sollen die Belege in die Monatsordner wandern:
 | `Tanken` | Tankbelege |
 | `Bar` | der Rest |
 
-Die Ordner-ID des jeweiligen Monats liefert ein noch einzurichtender
-n8n-Workflow; die Einteilung Konto/Bar ergibt sich bereits aus der
-Seitenzuordnung des Abrechnungs-PDFs, die Erkennung der Tankbelege aus dem
-Aussteller (KI-Extraktion oder eine Liste bekannter Tankstellenbetreiber).
+Die Einteilung steht bereits: `packages/server/src/onedrive/kategorie.ts`.
+Konto/Bar ergibt sich aus derselben Seitenzuordnung, die auch die Reihenfolge
+im Abrechnungs-PDF bestimmt; Tankbelege werden über Marke, Verwendungszweck,
+Dateiname und — sofern die KI aktiv ist — den ausgelesenen Aussteller erkannt.
+
+Die Reihenfolge der Regeln ist dabei nicht beliebig: eine mit Karte bezahlte
+Tankfüllung steht auf dem Kontoauszug und gehört nach `Konto`. `Tanken` meint
+die bar bezahlten Tankbelege.
+
+Die Ordner-ID des Monats liefert der n8n-Workflow **Find Ausgabenordner für
+Jahr und Monat** (`FfLNDgPrXdV6lJe3`). Was noch fehlt:
+
+* der Aufrufvertrag des Workflows (Feldnamen der Eingabe, Form der Antwort) —
+  für MCP ist er nicht freigegeben, also nicht auslesbar
+* ein zweiter Workflow, der eine Datei in einen Ordner **legt** — der
+  vorhandene liefert nur die ID
 
 ---
 
