@@ -411,6 +411,72 @@ describe('End-to-End: gesamte Programmkette', () => {
 
   // -------------------------------------------------------------------------
 
+  describe('Buchungen ohne Belegpflicht', () => {
+    beforeEach(async () => {
+      const daten = basisDaten();
+      daten.transaktionen.push(
+        tx({ id: 'tx-privat', amount: '-800.00', paymtPurpose: 'Privatentnahme' }),
+      );
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp();
+    });
+
+    it('macht eine markierte Buchung gruen und haelt sie in der Abrechnung', async () => {
+      let monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      expect(monat.positionen[0]!.status).toBe('offen');
+
+      monat = (
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/months/${MONAT}/positions/tx-privat`,
+          payload: { markierung: 'privatentnahme' },
+        })
+      ).json<Monat>();
+
+      expect(monat.positionen[0]!.status).toBe('ok');
+      expect(monat.summen.anzahlOffen).toBe(0);
+      expect(monat.summen.anzahlOhneBelegpflicht).toBe(1);
+      // Anders als beim Ausblenden zaehlt der Betrag weiter mit.
+      expect(monat.summen.ausgaben).toBe(800);
+    });
+
+    it('gilt der Monat damit als abgeschlossen', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      await app.inject({
+        method: 'PATCH',
+        url: `/api/months/${MONAT}/positions/tx-privat`,
+        payload: { markierung: 'dauerbeleg' },
+      });
+
+      const status = (
+        await app.inject({ url: `/api/months/${MONAT}/status` })
+      ).json<MonatsStatus>();
+      expect(status.abgeschlossen).toBe(true);
+    });
+
+    it('nimmt die Markierung wieder zurueck', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      await app.inject({
+        method: 'PATCH',
+        url: `/api/months/${MONAT}/positions/tx-privat`,
+        payload: { markierung: 'privatentnahme' },
+      });
+
+      const monat = (
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/months/${MONAT}/positions/tx-privat`,
+          payload: { markierung: null },
+        })
+      ).json<Monat>();
+
+      expect(monat.positionen[0]!.markierung).toBeUndefined();
+      expect(monat.positionen[0]!.status).toBe('offen');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
   describe('Lade-Stream fuer die Oberflaeche', () => {
     // Der Abruf dauert je nach Buchungszahl viele Sekunden. Die Startseite soll
     // deshalb nicht nur "wird geladen" zeigen, sondern sich aufbauen.
@@ -834,6 +900,38 @@ describe('End-to-End: gesamte Programmkette', () => {
       const p = monat.positionen[0]!;
       expect(p.dateien.map((d) => d.id)).toEqual([gewuenscht]);
       expect(p.status).toBe('ok');
+    });
+
+    it('laesst den vorausgewaehlten Beleg bestaetigen', async () => {
+      /*
+       * Der erste Treffer wird vorgeschlagen, die Buchung bleibt aber gelb, bis
+       * jemand entschieden hat. Ist die Vorauswahl die richtige, muss sich
+       * genau sie bestaetigen lassen - in der Oberflaeche fehlte dafuer
+       * zunaechst jede Moeglichkeit, weil ein Klick auf das bereits gewaehlte
+       * Feld kein Ereignis ausloest.
+       */
+      n8n.antworten.set('0626/1811TG01', [
+        { file: (await testPdf(1, 'A')).toString('base64'), filename: 'Rechnung_A.pdf' },
+        { file: (await testPdf(2, 'B')).toString('base64'), filename: 'Rechnung_B.pdf' },
+      ]);
+      let monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+
+      const vorausgewaehlt = monat.positionen[0]!.dateien[0]!.id;
+      expect(monat.positionen[0]!.status).toBe('mehrdeutig');
+
+      monat = (
+        await app.inject({
+          method: 'PATCH',
+          url: `/api/months/${MONAT}/positions/tx-1`,
+          payload: { dateiIds: [vorausgewaehlt] },
+        })
+      ).json<Monat>();
+
+      const p = monat.positionen[0]!;
+      expect(p.status).toBe('ok');
+      expect(p.dateien.map((d) => d.id)).toEqual([vorausgewaehlt]);
+      // Die Alternative bleibt sichtbar, macht aber nichts mehr mehrdeutig.
+      expect(p.kandidaten).toHaveLength(1);
     });
 
     it('grenzt auf den exakten Rechnungsindex ein, wenn moeglich', async () => {

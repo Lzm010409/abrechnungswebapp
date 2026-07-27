@@ -119,6 +119,19 @@ export type SevdeskStatus =
   /** unbekannter Statuscode */
   | 'unbekannt';
 
+/**
+ * Markierung einer Buchung, die keinen Beleg braucht.
+ *
+ * Anders als "ignoriert" bleibt die Buchung Teil der Abrechnung - sie taucht im
+ * Journal und in den Summen auf, verlangt aber keinen Beleg und gilt damit als
+ * erledigt.
+ */
+export type Markierung =
+  /** Entnahme fuer privat - gehoert in die Abrechnung, hat keinen Beleg */
+  | 'privatentnahme'
+  /** Miete, Leasing, Abo: der Beleg liegt einmalig als Vertrag vor */
+  | 'dauerbeleg';
+
 /** Eine Zeile der Monatsansicht: eine Bankbuchung samt allem, was daran haengt. */
 export interface Position {
   /** sevDesk CheckAccountTransaction-ID */
@@ -157,6 +170,9 @@ export interface Position {
    */
   auswahlBestaetigt?: boolean;
 
+  /** Setzt die Belegpflicht aus - siehe Markierung */
+  markierung?: Markierung;
+
   extraktion?: BelegExtraktion;
   status: PositionsStatus;
   /** Klartext-Begruendung fuer den Status, wird in der UI als Tooltip gezeigt */
@@ -180,6 +196,8 @@ export interface MonatsSummen {
    * abschliessend - die Zuordnung passiert in sevDesk, danach neu laden.
    */
   anzahlNichtZugeordnet: number;
+  /** Buchungen ohne Beleg, die auch keinen brauchen (Privat, Dauerbeleg) */
+  anzahlOhneBelegpflicht: number;
 }
 
 /** Kompakter Zustand eines Monats - ohne die vollstaendige Positionsliste. */
@@ -339,6 +357,8 @@ export interface ReviewBefund {
 export interface PositionsPatch {
   aktenzeichen?: string | null;
   status?: PositionsStatus;
+  /** null entfernt die Markierung wieder */
+  markierung?: Markierung | null;
   hinweis?: string | null;
   /** IDs aus `kandidaten`, die nach `dateien` uebernommen werden sollen */
   dateiIds?: string[];

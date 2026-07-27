@@ -240,10 +240,34 @@ zustande (puffernder Reverse-Proxy), fällt das Frontend automatisch auf
 
 | Ampel | Bedeutung |
 |---|---|
-| grün | Beleg eindeutig zugeordnet |
+| grün | Beleg eindeutig zugeordnet — oder als belegfrei markiert |
 | gelb | mehrere Treffer, Entscheidung nötig |
 | rot | kein Beleg gefunden |
 | grau | aus der Abrechnung ausgeblendet |
+
+### Mehrere Treffer: die Auswahl muss bestätigt werden
+
+Liefert der OneDrive-Abruf mehr als eine passende Datei, wird die erste
+**vorgeschlagen** — die Buchung bleibt aber gelb, bis jemand entschieden hat.
+Auch wenn der Vorschlag der richtige ist, braucht es den Klick: „als richtigen
+Beleg bestätigen". Erst damit wird die Buchung grün. Die übrigen Treffer
+bleiben sichtbar und lassen sich jederzeit nachträglich wählen.
+
+### Buchungen ohne Belegpflicht
+
+Nicht jede Buchung hat einen Beleg, und nicht jede braucht einen. Zwei
+Markierungen im Detailbereich:
+
+| Markierung | Wofür |
+|---|---|
+| **Privatentnahme** | Entnahme fürs Private — gehört in die Abrechnung, hat keinen Beleg |
+| **Dauerbeleg** | Miete, Leasing, Abo — der Beleg liegt einmalig als Vertrag vor |
+
+Beide machen die Buchung grün und erledigt. Der Unterschied zum Ausblenden ist
+wichtig: eine markierte Buchung **bleibt** in Journal, Summen und PDF stehen —
+in der Beleg-Spalte steht dann `privat` bzw. `Dauerbeleg`. Eine ausgeblendete
+Buchung fällt dagegen ganz heraus. Nochmal auf dieselbe Markierung klicken
+nimmt sie zurück.
 
 **Manuelle Korrekturen überleben jeden Neuabruf.** „Aus sevDesk laden" holt die
 Buchungen frisch, lässt eingetragene Aktenzeichen, Belegzuordnungen und
@@ -345,7 +369,7 @@ Zweifelsfälle — Beträge, Verknüpfungen und Summen kommen aus sevDesk.
 npm test
 ```
 
-279 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+287 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 

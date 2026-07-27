@@ -248,6 +248,7 @@ function zeichneDeckblatt(
     ['Buchungen gesamt', String(s.anzahlGesamt)],
     ['davon vollstaendig belegt', String(s.anzahlOk)],
     ['davon mehrdeutig', String(s.anzahlMehrdeutig)],
+    ['davon ohne Belegpflicht', String(s.anzahlOhneBelegpflicht)],
     ['davon ohne Beleg', String(s.anzahlOffen)],
     ['ausgeblendet', String(s.anzahlIgnoriert)],
   ];
@@ -395,6 +396,9 @@ function zeichneJournal(
 }
 
 function belegKuerzel(p: Position): string {
+  if (p.dateien.length === 0 && p.markierung) {
+    return p.markierung === 'privatentnahme' ? 'privat' : 'Dauerbeleg';
+  }
   if (p.status === 'offen' || p.dateien.length === 0) return 'fehlt';
   if (p.status === 'mehrdeutig') return `${p.dateien.length}x ?`;
   return p.dateien.length > 1 ? `${p.dateien.length}x` : 'ja';

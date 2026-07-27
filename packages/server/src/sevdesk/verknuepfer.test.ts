@@ -310,3 +310,67 @@ describe('baueTransaktionsIndex', () => {
     expect(index.size).toBe(0);
   });
 });
+
+describe('Buchungen ohne Belegpflicht', () => {
+  /*
+   * Privatentnahmen und Dauerbelege (Miete, Leasing, Abo) brauchen keinen
+   * monatlichen Beleg. Sie bleiben aber Teil der Abrechnung - anders als eine
+   * ausgeblendete Buchung, die ganz herausfaellt.
+   */
+
+  const pos = (teil: Partial<Position> & { id: string }): Position => ({
+    datum: '2026-06-03',
+    betrag: -100,
+    waehrung: 'EUR',
+    verwendungszweck: '',
+    typ: 'AUSGANG',
+    sevdeskStatus: 'verknuepft',
+    dateien: [],
+    status: 'offen',
+    manuellBestaetigt: false,
+    ...teil,
+  });
+
+  const beleg = {
+    id: 'd1',
+    dateiname: 'd1.pdf',
+    groesse: 1,
+    mimeType: 'application/pdf',
+    quelle: 'sevdesk-voucher' as const,
+  };
+
+  it('macht eine markierte Buchung ohne Beleg gruen statt rot', () => {
+    const privat = aktualisiereStatus(pos({ id: 'a', markierung: 'privatentnahme' }));
+    expect(privat.status).toBe('ok');
+    expect(privat.hinweis).toContain('Privatentnahme');
+
+    const dauer = aktualisiereStatus(pos({ id: 'b', markierung: 'dauerbeleg' }));
+    expect(dauer.status).toBe('ok');
+    expect(dauer.hinweis).toContain('Dauerbeleg');
+  });
+
+  it('laesst eine unmarkierte Buchung ohne Beleg rot', () => {
+    expect(aktualisiereStatus(pos({ id: 'a' })).status).toBe('offen');
+  });
+
+  it('nimmt eine markierte Buchung nicht aus der Abrechnung heraus', () => {
+    // Genau darin unterscheidet sie sich vom Ausblenden.
+    const summen = berechneSummen([
+      aktualisiereStatus(pos({ id: 'a', betrag: -500, markierung: 'privatentnahme' })),
+      aktualisiereStatus(pos({ id: 'b', betrag: -100, status: 'ignoriert' })),
+    ]);
+
+    expect(summen.ausgaben).toBe(500);
+    expect(summen.anzahlOhneBelegpflicht).toBe(1);
+    expect(summen.anzahlIgnoriert).toBe(1);
+    expect(summen.anzahlOffen).toBe(0);
+  });
+
+  it('zaehlt eine markierte Buchung mit Beleg nicht als belegfrei', () => {
+    const summen = berechneSummen([
+      aktualisiereStatus(pos({ id: 'a', dateien: [beleg], markierung: 'dauerbeleg' })),
+    ]);
+    expect(summen.anzahlOhneBelegpflicht).toBe(0);
+    expect(summen.anzahlOk).toBe(1);
+  });
+});

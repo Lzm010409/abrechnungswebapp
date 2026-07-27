@@ -442,6 +442,10 @@ export class MonatsDienst {
       teil.aktenzeichenKandidaten = undefined;
     }
 
+    if (patch.markierung !== undefined) {
+      teil.markierung = patch.markierung ?? undefined;
+    }
+
     if (patch.status !== undefined) teil.status = patch.status;
     if (patch.hinweis !== undefined) teil.hinweis = patch.hinweis ?? undefined;
 

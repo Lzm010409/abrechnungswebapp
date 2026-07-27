@@ -68,7 +68,19 @@ export function PositionenTabelle({ positionen, ausgewaehlt, onAuswahl }: Props)
                 <span className={`typ ${p.typ.toLowerCase()}`}>
                   {p.typ === 'EINGANG' ? 'EIN' : 'AUS'}
                 </span>
-                {p.sevdeskStatus === 'offen' && (
+                {p.markierung && (
+                  <span
+                    className={`marke ${p.markierung}`}
+                    title={
+                      p.markierung === 'privatentnahme'
+                        ? 'Privatentnahme – kein Beleg erforderlich'
+                        : 'Dauerbeleg – der Beleg liegt einmalig als Vertrag vor'
+                    }
+                  >
+                    {p.markierung === 'privatentnahme' ? 'privat' : 'Dauer'}
+                  </span>
+                )}
+                {p.sevdeskStatus === 'offen' && !p.markierung && (
                   <span
                     className="marke sevdesk-offen"
                     title="In sevDesk noch nicht zugeordnet – dort verbuchen, dann neu laden"
@@ -99,6 +111,9 @@ export function PositionenTabelle({ positionen, ausgewaehlt, onAuswahl }: Props)
 }
 
 function belegKuerzel(p: Position): string {
+  if (p.dateien.length === 0 && p.markierung) {
+    return p.markierung === 'privatentnahme' ? 'privat' : 'Dauerbeleg';
+  }
   if (p.dateien.length === 0) {
     // Liegt es an sevDesk, hilft ein Beleg-Upload hier nicht weiter.
     return p.sevdeskStatus === 'offen' ? 'nicht verbucht' : '—';

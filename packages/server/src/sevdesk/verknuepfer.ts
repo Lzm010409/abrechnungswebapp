@@ -164,6 +164,18 @@ export function aktualisiereStatus(
   }
 
   if (position.dateien.length === 0) {
+    // Markierte Buchungen brauchen keinen Beleg - sie bleiben aber Teil der
+    // Abrechnung, anders als eine ausgeblendete Buchung.
+    if (position.markierung) {
+      return {
+        ...position,
+        status: 'ok',
+        hinweis:
+          position.markierung === 'privatentnahme'
+            ? 'Privatentnahme - kein Beleg erforderlich'
+            : 'Dauerbeleg - der Beleg liegt einmalig vor (Vertrag, Abo)',
+      };
+    }
     return { ...position, status: 'offen' };
   }
 
@@ -219,6 +231,9 @@ export function berechneSummen(positionen: Position[]): MonatsSummen {
     anzahlOffen: zaehle('offen'),
     anzahlIgnoriert: zaehle('ignoriert'),
     anzahlNichtZugeordnet: relevant.filter((p) => p.sevdeskStatus === 'offen').length,
+    anzahlOhneBelegpflicht: relevant.filter(
+      (p) => p.markierung && p.dateien.length === 0,
+    ).length,
   };
 }
 

@@ -130,35 +130,94 @@ export function Detailbereich({
       {/* -- Kandidatenauswahl bei mehreren Treffern -- */}
       {(position.kandidaten?.length ?? 0) > 0 && (
         <section>
-          <h4>Weitere gefundene Dateien</h4>
+          <h4>Mehrere Belege gefunden</h4>
           <p className="klein grau">
-            Der OneDrive-Abruf hat mehrere passende Dateien geliefert. Die richtige
-            auswählen:
+            {position.status === 'mehrdeutig'
+              ? 'Der oberste ist vorausgewählt. Bitte bestätigen oder einen anderen ' +
+                'wählen – solange bleibt die Buchung gelb.'
+              : 'Ausgewählt und bestätigt. Ein anderer Beleg lässt sich jederzeit wählen.'}
           </p>
           <ul className="kandidaten">
-            {[...position.dateien, ...(position.kandidaten ?? [])].map((d) => (
-              <li key={d.id}>
-                <label>
-                  <input
-                    type="radio"
-                    name="beleg"
-                    checked={position.dateien.some((x) => x.id === d.id)}
-                    onChange={() =>
-                      fuehreAus(() =>
-                        api.patchePosition(monat, position.id, { dateiIds: [d.id] }),
-                      )
-                    }
-                  />
-                  <span>{d.dateiname}</span>
-                </label>
-                <a href={api.dateiUrl(monat, d.id)} target="_blank" rel="noreferrer">
-                  öffnen
-                </a>
-              </li>
-            ))}
+            {[...position.dateien, ...(position.kandidaten ?? [])].map((d) => {
+              const gewaehlt = position.dateien.some((x) => x.id === d.id);
+              return (
+                <li key={d.id}>
+                  <label>
+                    <input
+                      type="radio"
+                      name="beleg"
+                      checked={gewaehlt}
+                      /*
+                       * onClick statt onChange: ein Klick auf das bereits
+                       * ausgewaehlte Feld loest kein change-Ereignis aus. Die
+                       * Vorauswahl liess sich dadurch gar nicht bestaetigen -
+                       * die Buchung blieb gelb, ohne dass ersichtlich war, was
+                       * noch fehlt.
+                       */
+                      onClick={() =>
+                        fuehreAus(() =>
+                          api.patchePosition(monat, position.id, { dateiIds: [d.id] }),
+                        )
+                      }
+                    />
+                    <span>{d.dateiname}</span>
+                  </label>
+                  <a href={api.dateiUrl(monat, d.id)} target="_blank" rel="noreferrer">
+                    öffnen
+                  </a>
+                </li>
+              );
+            })}
           </ul>
+
+          {position.status === 'mehrdeutig' && aktiveDatei && (
+            <button
+              className="primaer"
+              disabled={laedt}
+              onClick={() =>
+                fuehreAus(() =>
+                  api.patchePosition(monat, position.id, { dateiIds: [aktiveDatei.id] }),
+                )
+              }
+            >
+              „{aktiveDatei.dateiname}" als richtigen Beleg bestätigen
+            </button>
+          )}
         </section>
       )}
+
+      {/* -- Buchungen ohne Belegpflicht -- */}
+      <section>
+        <h4>Belegpflicht</h4>
+        <p className="klein grau">
+          Markierte Buchungen bleiben in der Abrechnung und im Journal, verlangen aber
+          keinen Beleg. Zum Ausblenden ist der Knopf weiter unten gedacht.
+        </p>
+        <div className="markierungen">
+          {(
+            [
+              ['privatentnahme', 'Privatentnahme'],
+              ['dauerbeleg', 'Dauerbeleg'],
+            ] as const
+          ).map(([wert, text]) => (
+            <button
+              key={wert}
+              className={position.markierung === wert ? 'gewaehlt' : ''}
+              disabled={laedt}
+              onClick={() =>
+                fuehreAus(() =>
+                  api.patchePosition(monat, position.id, {
+                    // Nochmal klicken nimmt die Markierung zurueck.
+                    markierung: position.markierung === wert ? null : wert,
+                  }),
+                )
+              }
+            >
+              {text}
+            </button>
+          ))}
+        </div>
+      </section>
 
       {/* -- Aktenzeichen -- */}
       <section>
