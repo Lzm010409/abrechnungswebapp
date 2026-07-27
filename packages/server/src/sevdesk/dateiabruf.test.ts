@@ -1,3 +1,4 @@
+import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { describe, expect, it, vi } from 'vitest';
 import { SevDeskClient } from './client.js';
 
@@ -399,20 +400,32 @@ describe('Rechnungs-PDF', () => {
 describe('Belegdatei - mehrere Seiten', () => {
   /*
    * Ein Beleg besteht nicht immer aus einer Datei: eine Tankquittung wird
-   * gelegentlich als zwei Scans abgelegt, mitunter erst die Rueckseite. Frueher
-   * wurde nur der erste Fund genommen - im Abrechnungs-PDF fehlte dann die
-   * andere Seite, ohne dass es jemandem auffiel.
+   * gelegentlich als zwei Scans abgelegt, ein Kreditvertrag als zweiunddreissig
+   * Einzelseiten. Zwei Fehler lauern hier hintereinander. Frueher wurde nur der
+   * erste Fund genommen - im Abrechnungs-PDF fehlte dann die andere Seite.
+   * Danach wurde jede Seite als eigener Beleg gefuehrt: an der Buchung stand
+   * "32 Dateien", und die Ablage haette zweiunddreissig Dateien einzeln nach
+   * OneDrive geschoben. Richtig ist: alle Seiten holen, zu einem Beleg buendeln.
    */
 
+  /** Ein echtes, ladbares PDF mit einer beschrifteten Seite. */
+  async function echteSeite(kennung: string): Promise<string> {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    doc.addPage([595, 842]).drawText(kennung, { x: 50, y: 700, size: 12, font });
+    return Buffer.from(await doc.save()).toString('base64');
+  }
+
+  /** Sieht aus wie ein PDF, ist aber keines - laesst sich nicht buendeln. */
   const seite = (kennung: string) =>
     Buffer.from(`%PDF-1.4\n${kennung}`, 'latin1').toString('base64');
 
-  it('nimmt alle Seiten aus einem Array', async () => {
+  it('fasst die Seiten zu einem Beleg zusammen', async () => {
     const fetchImpl = vi.fn(async () =>
       jsonAntwort({
         objects: [
-          { content: seite('RUECKSEITE'), filename: 'scan-1.pdf' },
-          { content: seite('VORDERSEITE'), filename: 'scan-2.pdf' },
+          { content: await echteSeite('RUECKSEITE'), filename: 'scan-1.pdf' },
+          { content: await echteSeite('VORDERSEITE'), filename: 'scan-2.pdf' },
         ],
       }),
     );
@@ -420,13 +433,31 @@ describe('Belegdatei - mehrere Seiten', () => {
     const dateien = await baueClient(fetchImpl as unknown as typeof fetch)
       .holeVoucherDateien('v-1');
 
-    expect(dateien).toHaveLength(2);
-    expect(dateien.map((d) => d.dateiname)).toEqual(['scan-1.pdf', 'scan-2.pdf']);
-    expect(dateien[0]!.daten.toString()).toContain('RUECKSEITE');
-    expect(dateien[1]!.daten.toString()).toContain('VORDERSEITE');
+    // Ein Beleg, nicht zwei.
+    expect(dateien).toHaveLength(1);
+    expect(dateien[0]!.dateiname).toBe('beleg-v-1.pdf');
+    expect(dateien[0]!.mimeType).toBe('application/pdf');
+
+    // Beide Seiten sind drin, in der gelieferten Reihenfolge.
+    const gebuendelt = await PDFDocument.load(dateien[0]!.daten);
+    expect(gebuendelt.getPageCount()).toBe(2);
   });
 
-  it('nummeriert die Seiten, wenn keine Namen mitkommen', async () => {
+  it('behaelt alle Seiten eines langen Belegs', async () => {
+    const seiten = await Promise.all(
+      Array.from({ length: 32 }, (_, i) => echteSeite(`Seite ${i + 1}`)),
+    );
+    const fetchImpl = vi.fn(async () => jsonAntwort({ objects: seiten }));
+
+    const dateien = await baueClient(fetchImpl as unknown as typeof fetch)
+      .holeVoucherDateien('v-7');
+
+    expect(dateien).toHaveLength(1);
+    expect((await PDFDocument.load(dateien[0]!.daten)).getPageCount()).toBe(32);
+  });
+
+  it('laesst die Seiten einzeln, wenn eine sich nicht buendeln laesst', async () => {
+    // Lieber drei Dateien als eine, in der eine Seite fehlt.
     const fetchImpl = vi.fn(async () =>
       jsonAntwort({ objects: [seite('A'), seite('B'), seite('C')] }),
     );

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { fasseSeitenZusammen } from '../pdf/seitenbund.js';
 import type {
   CheckAccount,
   CheckAccountTransaction,
@@ -440,18 +442,23 @@ export class SevDeskClient {
   }
 
   /**
-   * Alle Belegdateien eines Vouchers - leer, wenn keine angehaengt ist.
+   * Der Beleg eines Vouchers - als eine Datei, leer wenn keiner angehaengt ist.
    *
-   * Bewusst alle: ein Beleg kann aus mehreren Scans bestehen (Vorder- und
-   * Rueckseite einer Tankquittung), und im Abrechnungs-PDF muessen sie
-   * vollstaendig ankommen.
+   * sevDesk liefert hier die *Seiten* des Belegs: eine gescannte Tankquittung
+   * kommt als Vorder- und Rueckseite, ein Kreditvertrag als zweiunddreissig
+   * Einzelseiten. Alle muessen abgerufen werden, damit im Abrechnungs-PDF
+   * nichts fehlt - aber sie sind ein Beleg und werden deshalb zu einer Datei
+   * zusammengefasst. Nur wenn das nicht geht, bleiben es mehrere.
    */
   async holeVoucherDateien(voucherId: string): Promise<Datei[]> {
-    return this.holeDateien(
+    const name = `beleg-${voucherId}.pdf`;
+    const seiten = await this.holeDateien(
       `/Voucher/${voucherId}/getDocumentImage`,
       {},
-      `beleg-${voucherId}.pdf`,
+      name,
     );
+
+    return fasseSeitenZusammen(seiten, { dateiname: name, log: this.log });
   }
 
   /** Ausgangsrechnung als PDF - Fallback, wenn n8n/OneDrive nichts liefert. */
@@ -560,11 +567,18 @@ function sucheDateiInhalte(wert: unknown, tiefe = 0): DateiFund[] {
   return entdopple(funde.map((fund) => ({ dateiname, mimeType, ...fund })));
 }
 
-/** Dieselbe Datei kann in der Antwort mehrfach auftauchen. */
+/**
+ * Dieselbe Datei kann in der Antwort mehrfach auftauchen.
+ *
+ * Verglichen wird der vollstaendige Inhalt. Frueher genuegten Laenge und die
+ * ersten 64 Bytes - bei den Seiten eines Scans ist das aber genau der immer
+ * gleiche PDF-Kopf, und zwei gleich lange Seiten desselben Belegs galten
+ * faelschlich als Doppel. Eine davon verschwand dann stillschweigend.
+ */
 function entdopple(funde: DateiFund[]): DateiFund[] {
   const gesehen = new Set<string>();
   return funde.filter((fund) => {
-    const schluessel = `${fund.daten.byteLength}:${fund.daten.subarray(0, 64).toString('base64')}`;
+    const schluessel = createHash('sha256').update(fund.daten).digest('base64');
     if (gesehen.has(schluessel)) return false;
     gesehen.add(schluessel);
     return true;

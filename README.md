@@ -22,12 +22,25 @@ sevDesk /CheckAccountTransaction        Buchungen des Monats
                                         sonst aus dem Verwendungszweck
                     ↓
         Belegdateien                    AUSGANG → /Voucher/{id}/getDocumentImage
-                                                  (alle Seiten, nicht nur die erste)
+                                                  (alle Seiten, zu einem Beleg
+                                                   gebündelt)
                                         EINGANG → n8n → OneDrive-Gutachtenordner
                                                   (Fallback /Invoice/{id}/getPdf)
                     ↓
         Abrechnungs-PDF                 Deckblatt · Kontoauszüge · Journal · Belege
 ```
+
+**Ein Beleg, eine Datei.** `getDocumentImage` liefert nicht *den* Beleg,
+sondern seine *Seiten* — eine gescannte Tankquittung als Vorder- und
+Rückseite, ein Kreditvertrag schon mal als zweiunddreißig Einzelseiten. Alle
+werden abgerufen, damit im Abrechnungs-PDF nichts fehlt, und anschließend zu
+einer PDF-Datei zusammengefasst. Sonst stünde an der Buchung „32 Dateien", die
+Ablage schöbe zweiunddreißig Dateien einzeln nach OneDrive und die KI läse
+denselben Vertrag zweiunddreißig Mal aus.
+
+Lässt sich auch nur eine Seite nicht einbetten — ein TIFF, ein beschädigtes
+PDF —, bleibt es beim ursprünglichen Satz Einzeldateien. Lieber mehrere
+Dateien als eine, in der eine Seite fehlt.
 
 ### Aktenzeichen und Rechnungsnummer
 
