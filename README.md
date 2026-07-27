@@ -327,7 +327,7 @@ Zweifelsfälle — Beträge, Verknüpfungen und Summen kommen aus sevDesk.
 npm test
 ```
 
-217 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+224 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 
@@ -363,8 +363,16 @@ Ein echter API-Aufruf findet dabei nicht statt.
 docker compose up -d --build
 ```
 
-`/data` als Volume mounten — dort liegen SQLite-Datenbank, Belegcache und
-erzeugte PDFs.
+`/data` **muss** als Volume eingebunden werden — dort liegen SQLite-Datenbank,
+Belegcache und erzeugte PDFs. In Coolify geschieht das unter *Persistent
+Storage* (Pfad `/data`); mit `docker compose` erledigt es die mitgelieferte
+`docker-compose.yml`.
+
+Fehlt die Einbindung, liegen die Daten in der Schreibschicht des Containers und
+sind beim nächsten Deploy weg. Sichtbar wird das erst später und an der falschen
+Stelle — als Beleg, der sich nicht mehr anzeigen lässt. Der Server warnt
+deshalb beim Start, wenn `/data` nicht eingebunden ist, und holt fehlende
+Belegdateien beim nächsten Laden des Monats automatisch neu.
 
 **Vor dem nächsten Deploy** müssen die Entra-Variablen gesetzt sein
 (`ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`,

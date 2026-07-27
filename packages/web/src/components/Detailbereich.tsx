@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Capabilities, Position } from '@abrechnung/shared';
 import { api, deutschesDatum, euro } from '../api/client';
 
@@ -9,9 +9,13 @@ import { api, deutschesDatum, euro } from '../api/client';
  * Bildsymbol liefert.
  */
 function istBild(datei: { mimeType: string; dateiname: string }): boolean {
+  // Die Endung zaehlt zuerst: sevDesk hat Belege schon als "image/..." gemeldet,
+  // die in Wahrheit PDFs waren - ein <img> zeigt darauf nur ein kaputtes
+  // Bildsymbol.
+  if (/\.pdf$/i.test(datei.dateiname)) return false;
+  if (/\.(png|jpe?g|gif|webp|bmp|tiff?)$/i.test(datei.dateiname)) return true;
   if (datei.mimeType.startsWith('image/')) return true;
-  if (datei.mimeType.includes('pdf')) return false;
-  return /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i.test(datei.dateiname);
+  return false;
 }
 
 interface Props {
@@ -36,7 +40,13 @@ export function Detailbereich({
   const [azEingabe, setAzEingabe] = useState('');
   const [kiKandidaten, setKiKandidaten] = useState<string[]>([]);
   const [laedt, setLaedt] = useState(false);
+  const [bildFehler, setBildFehler] = useState(false);
   const dateiFeld = useRef<HTMLInputElement>(null);
+
+  // Bei einem Wechsel der Buchung wieder von vorn: die naechste Datei kann
+  // sehr wohl ein anzeigbares Bild sein.
+  const aktiveDateiId = position?.dateien[0]?.id;
+  useEffect(() => setBildFehler(false), [aktiveDateiId]);
 
   if (!position) {
     return (
@@ -86,8 +96,14 @@ export function Detailbereich({
           zeigt nur ein kaputtes Bildsymbol. */}
       <div className="vorschau">
         {aktiveDatei ? (
-          istBild(aktiveDatei) ? (
-            <img src={api.dateiUrl(monat, aktiveDatei.id)} alt={aktiveDatei.dateiname} />
+          istBild(aktiveDatei) && !bildFehler ? (
+            <img
+              src={api.dateiUrl(monat, aktiveDatei.id)}
+              alt={aktiveDatei.dateiname}
+              // Laesst sich der Beleg nicht als Bild anzeigen, uebernimmt der
+              // Rahmen - besser als ein kaputtes Bildsymbol.
+              onError={() => setBildFehler(true)}
+            />
           ) : (
             <iframe
               title={aktiveDatei.dateiname}

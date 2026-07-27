@@ -202,6 +202,17 @@ export async function registriereRouten(
     '/api/months/:monat/files/:dateiId',
     async (req, reply) => {
       const monat = pruefeMonat(req.params.monat);
+
+      // Fehlt die Datei, ist das kein Serverfehler, sondern ein bekannter
+      // Zustand: der Zwischenspeicher kennt sie noch, das Datenverzeichnis
+      // nicht mehr. Ein roher ENOENT-Text half beim Verstehen nicht weiter.
+      if (!(await ctx.ablage.existiert(monat, req.params.dateiId))) {
+        throw new NichtGefunden(
+          'Diese Belegdatei liegt nicht mehr im Datenverzeichnis. ' +
+            'Den Monat neu aus sevDesk laden, dann wird sie erneut geholt.',
+        );
+      }
+
       const daten = await ctx.ablage.lese(monat, req.params.dateiId);
 
       // Typ aus dem Inhalt bestimmen, nicht aus der Endung: sevDesk liefert

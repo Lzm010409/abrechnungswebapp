@@ -38,8 +38,13 @@ COPY --from=build /app/packages/server/dist   ./packages/server/dist
 COPY --from=build /app/packages/server/package.json ./packages/server/package.json
 COPY --from=build /app/packages/web/dist      ./packages/web/dist
 
-# SQLite-Datei, Belegcache und erzeugte PDFs liegen hier - als Volume mounten.
-VOLUME ["/data"]
+# SQLite-Datei, Belegcache und erzeugte PDFs liegen hier.
+#
+# Bewusst KEIN VOLUME: Docker legt daraus bei jedem neuen Container ein neues
+# anonymes Volume an, das beim naechsten Deploy stillschweigend verwaist - der
+# Zwischenspeicher waere jedes Mal weg, ohne dass es jemand merkt. Das
+# Verzeichnis muss ausdruecklich eingebunden werden (docker-compose.yml bzw.
+# "Persistent Storage" in Coolify). Der Server warnt beim Start, wenn das fehlt.
 RUN mkdir -p /data && chown -R node:node /data
 USER node
 

@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
@@ -17,6 +18,40 @@ import { Dateiablage } from './storage/dateien.js';
 export interface AppInstanz {
   app: FastifyInstance;
   db: Datenbank;
+}
+
+/**
+ * Warnt, wenn das Datenverzeichnis im Container nicht eingebunden ist.
+ *
+ * Ohne Einbindung liegen Datenbank und Belege in der Schreibschicht des
+ * Containers und sind beim naechsten Deploy verschwunden. Das faellt sonst
+ * erst auf, wenn ein Beleg nicht mehr angezeigt werden kann - also spaet und
+ * an der falschen Stelle.
+ */
+async function warneVorFluechtigemDatenverzeichnis(
+  app: FastifyInstance,
+  dataDir: string,
+): Promise<void> {
+  // Nur im Container aussagekraeftig; lokal ist ./data ohnehin dauerhaft.
+  if (!existsSync('/.dockerenv')) return;
+
+  try {
+    const mounts = await readFile('/proc/self/mountinfo', 'utf8');
+    const eingebunden = mounts
+      .split('\n')
+      .some((zeile) => zeile.split(' ')[4] === dataDir);
+
+    if (!eingebunden) {
+      app.log.warn(
+        { dataDir },
+        `${dataDir} ist nicht eingebunden - Datenbank und heruntergeladene Belege ` +
+          'gehen beim naechsten Deploy verloren. In Coolify unter "Persistent Storage" ' +
+          'ein Volume auf diesen Pfad legen.',
+      );
+    }
+  } catch {
+    // Ohne /proc laesst sich das nicht feststellen - dann eben ohne Warnung.
+  }
 }
 
 /** Parameter, die als Klartext im Log nichts zu suchen haben. */
@@ -111,6 +146,8 @@ export async function baueApp(config: Config): Promise<AppInstanz> {
     { id: checkAccount.id, name: checkAccount.name },
     'Bankkonto fuer die Abrechnung',
   );
+
+  await warneVorFluechtigemDatenverzeichnis(app, config.dataDir);
 
   const db = new Datenbank(config.dataDir);
   const ablage = new Dateiablage(config.dataDir);

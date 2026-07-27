@@ -66,10 +66,92 @@ export class MonatsDienst {
     if (!neuLaden) {
       const zwischengespeichert = this.deps.db.ladeMonat(monat);
       if (zwischengespeichert) {
-        return this.veredele(monat, zwischengespeichert.positionen, zwischengespeichert);
+        const positionen = await this.stelleDateienSicher(
+          monat,
+          zwischengespeichert.positionen,
+          beobachter,
+        );
+        return this.veredele(monat, positionen, zwischengespeichert);
       }
     }
     return this.synchronisiere(monat, beobachter);
+  }
+
+  /**
+   * Prueft, ob die im Zwischenspeicher vermerkten Belegdateien noch auf der
+   * Platte liegen, und holt fehlende neu.
+   *
+   * Datenbank und Dateien koennen auseinanderlaufen - etwa wenn das
+   * Datenverzeichnis nicht dauerhaft eingebunden ist und ein neuer Container
+   * mit leerem Verzeichnis startet. Ohne diese Pruefung zeigt die Oberflaeche
+   * dann dauerhaft einen Beleg an, den es nicht mehr gibt.
+   */
+  private async stelleDateienSicher(
+    monat: string,
+    positionen: Position[],
+    beobachter?: LadeBeobachter,
+  ): Promise<Position[]> {
+    const { ablage, log } = this.deps;
+
+    const luecken: number[] = [];
+    for (const [i, position] of positionen.entries()) {
+      const alle = [...position.dateien, ...(position.kandidaten ?? [])];
+      for (const datei of alle) {
+        if (!(await ablage.existiert(monat, datei.id))) {
+          luecken.push(i);
+          break;
+        }
+      }
+    }
+
+    if (luecken.length === 0) return positionen;
+
+    log?.warn(
+      { monat, anzahl: luecken.length },
+      'Belegdateien fehlen im Datenverzeichnis - sie werden neu geholt',
+    );
+
+    const ergebnis = [...positionen];
+    let fertig = 0;
+    beobachter?.fortschritt({
+      phase: 'dateien',
+      text: 'Fehlende Belegdateien werden neu geholt',
+      erledigt: 0,
+      gesamt: luecken.length,
+    });
+
+    await nacheinanderBegrenzt(luecken, 4, async (i) => {
+      const position = positionen[i]!;
+      // Ohne die alten Verweise, sonst blieben die toten Eintraege stehen.
+      const leer: Position = { ...position, dateien: [], kandidaten: undefined };
+
+      try {
+        const neu = await this.ladeDateiFuer(monat, leer);
+        ergebnis[i] =
+          neu.dateien.length > 0
+            ? neu
+            : {
+                ...leer,
+                hinweis:
+                  neu.hinweis ??
+                  'Beleg war im Zwischenspeicher vermerkt, liegt aber nicht mehr vor.',
+              };
+      } catch (err) {
+        const meldung = err instanceof Error ? err.message : String(err);
+        log?.warn({ positionId: position.id, err: meldung }, 'Nachladen fehlgeschlagen');
+        ergebnis[i] = { ...leer, hinweis: `Beleg nicht mehr vorhanden: ${meldung}` };
+      } finally {
+        fertig++;
+        beobachter?.fortschritt({
+          phase: 'dateien',
+          text: 'Fehlende Belegdateien werden neu geholt',
+          erledigt: fertig,
+          gesamt: luecken.length,
+        });
+      }
+    });
+
+    return ergebnis;
   }
 
   /** Holt den Monat frisch aus sevDesk und laedt fehlende Belege nach. */

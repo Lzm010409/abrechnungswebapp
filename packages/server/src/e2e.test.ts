@@ -312,6 +312,88 @@ describe('End-to-End: gesamte Programmkette', () => {
 
   // -------------------------------------------------------------------------
 
+  describe('Verlorene Belegdateien', () => {
+    /*
+     * Aufgetreten in der Produktion: die Datenbank kannte einen Beleg, das
+     * Datenverzeichnis nicht mehr - die Oberflaeche zeigte statt des Belegs
+     * "ENOENT: no such file or directory". Ursache war ein nicht dauerhaft
+     * eingebundenes Datenverzeichnis; die Anwendung muss sich davon erholen.
+     */
+
+    beforeEach(async () => {
+      const daten = basisDaten();
+      daten.transaktionen.push(
+        tx({
+          id: 'tx-aus', amount: '-119.00', paymtPurpose: 'Telekom',
+          valueDate: '2026-06-05T00:00:00+02:00',
+        }),
+      );
+      daten.vouchers.push({
+        id: 'v-1', objectName: 'Voucher', status: '1000',
+        supplierName: 'Telekom', sumGross: '119.00',
+      });
+      daten.voucherTransaktionen['v-1'] = ['tx-aus'];
+      daten.voucherDateien['v-1'] = await testPdf(2);
+
+      sevdesk = await starteMockSevDesk(daten);
+      await starteApp();
+    });
+
+    /** Loescht die abgelegten Dateien, laesst die Datenbank unberuehrt. */
+    const loescheDateien = () =>
+      rmSync(join(dataDir, 'monate', MONAT), { recursive: true, force: true });
+
+    it('holt eine verschwundene Datei beim naechsten Laden neu', async () => {
+      const vorher = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      expect(vorher.positionen[0]!.dateien).toHaveLength(1);
+
+      loescheDateien();
+
+      const nachher = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      expect(nachher.positionen[0]!.dateien).toHaveLength(1);
+      expect(nachher.positionen[0]!.status).toBe('ok');
+
+      // Und die Datei ist wieder abrufbar - darum ging es.
+      const res = await app.inject({
+        url: `/api/months/${MONAT}/files/${nachher.positionen[0]!.dateien[0]!.id}`,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.rawPayload.subarray(0, 5).toString()).toBe('%PDF-');
+    });
+
+    it('laesst den Zwischenspeicher in Ruhe, solange alles da ist', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      const nachErstem = sevdesk.aufrufe.length;
+
+      await app.inject({ url: `/api/months/${MONAT}` });
+      expect(sevdesk.aufrufe.length).toBe(nachErstem);
+    });
+
+    it('sagt deutlich, wenn die Datei weg und nicht wiederbeschaffbar ist', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      loescheDateien();
+      // sevDesk liefert den Beleg nicht mehr aus.
+      sevdesk.daten.voucherDateien = {};
+
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      expect(monat.positionen[0]!.dateien).toHaveLength(0);
+      expect(monat.positionen[0]!.status).toBe('offen');
+      expect(monat.positionen[0]!.hinweis).toBeTruthy();
+    });
+
+    it('beantwortet eine fehlende Datei mit 404 statt mit einem Serverfehler', async () => {
+      const res = await app.inject({
+        url: `/api/months/${MONAT}/files/gibtsnicht.pdf`,
+      });
+      expect(res.statusCode).toBe(404);
+      expect(res.json().fehler).toContain('Datenverzeichnis');
+      // Der rohe Systemfehler hat in der Oberflaeche nichts zu suchen.
+      expect(res.json().fehler).not.toContain('ENOENT');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
   describe('Lade-Stream fuer die Oberflaeche', () => {
     // Der Abruf dauert je nach Buchungszahl viele Sekunden. Die Startseite soll
     // deshalb nicht nur "wird geladen" zeigen, sondern sich aufbauen.
