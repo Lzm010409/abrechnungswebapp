@@ -6,7 +6,98 @@
     <title>Belegabrechnung</title>
   </head>
   <body>
-    <div id="root"></div>
+    <!--
+      Der Platzhalter wird von React beim ersten Rendern ersetzt. Bleibt er
+      stehen, wurde das JavaScript nicht ausgefuehrt - eine weisse Seite ohne
+      jeden Hinweis waere sonst nicht von einem Serverfehler zu unterscheiden.
+    -->
+    <div id="root">
+      <div id="start-hinweis">
+        <h1>Belegabrechnung</h1>
+        <p class="laedt">Anwendung wird geladen …</p>
+        <div id="start-fehler" hidden>
+          <p>
+            Die Anwendung konnte nicht gestartet werden. Meist hilft ein
+            vollständiges Neuladen mit <kbd>Strg</kbd> + <kbd>Umschalt</kbd> +
+            <kbd>R</kbd>.
+          </p>
+          <pre id="start-fehlertext"></pre>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // Absichtlich kein Modul: dieses Skript muss auch dann laufen, wenn das
+      // Modul-Bundle gar nicht erst geladen werden kann.
+      (function () {
+        var kasten = document.getElementById('start-fehler');
+        var text = document.getElementById('start-fehlertext');
+        var laedt = document.querySelector('#start-hinweis .laedt');
+
+        function zeige(meldung) {
+          if (!kasten || !text) return;
+          if (laedt) laedt.remove();
+          kasten.hidden = false;
+          text.textContent += meldung + '\n';
+        }
+
+        // true = auch Ladefehler von <script> und <link> melden, die steigen
+        // nicht auf und blieben sonst unsichtbar.
+        window.addEventListener(
+          'error',
+          function (e) {
+            if (e.target && e.target !== window && e.target.src) {
+              zeige('Datei konnte nicht geladen werden: ' + e.target.src);
+            } else {
+              zeige(e.message || String(e.error));
+            }
+          },
+          true,
+        );
+
+        window.addEventListener('unhandledrejection', function (e) {
+          zeige('Unbehandelter Fehler: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
+        });
+
+        // Laeuft das Bundle, ist der Platzhalter laengst ersetzt.
+        setTimeout(function () {
+          if (document.getElementById('start-hinweis') && kasten && kasten.hidden) {
+            zeige(
+              'Das JavaScript der Anwendung wurde nicht ausgeführt. ' +
+                'Vermutlich liegt eine veraltete Fassung im Browser-Cache.',
+            );
+          }
+        }, 8000);
+      })();
+    </script>
+
     <script type="module" src="/src/main.tsx"></script>
+
+    <style>
+      #start-hinweis {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        max-width: 460px;
+        margin: 15vh auto;
+        padding: 0 20px;
+        color: #1a1d21;
+      }
+      #start-hinweis h1 { font-size: 20px; margin: 0 0 12px; }
+      #start-hinweis p { color: #6b7280; line-height: 1.5; font-size: 14px; }
+      #start-fehlertext {
+        white-space: pre-wrap;
+        word-break: break-all;
+        background: #f1f3f5;
+        border-radius: 6px;
+        padding: 10px;
+        font-size: 12px;
+      }
+      #start-hinweis kbd {
+        background: #f1f3f5;
+        border: 1px solid #dfe3e8;
+        border-radius: 4px;
+        padding: 1px 5px;
+        font-size: 12px;
+      }
+    </style>
   </body>
 </html>
