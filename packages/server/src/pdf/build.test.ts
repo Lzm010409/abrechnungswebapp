@@ -1,13 +1,33 @@
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
 import type { Monat, Position } from '@abrechnung/shared';
 import { baueAbrechnungsPdf } from './build.js';
+import { leseSeitentexte } from './seitenzuordnung.js';
 
 /** Erzeugt ein echtes PDF mit n Seiten als Testeingabe. */
 async function testPdf(seiten: number): Promise<Buffer> {
   const doc = await PDFDocument.create();
   for (let i = 0; i < seiten; i++) doc.addPage([595.28, 841.89]);
   return Buffer.from(await doc.save());
+}
+
+/** Kontoauszug mit lesbarer Textebene - je Eintrag eine Seite. */
+async function auszugMitText(seiten: string[][]): Promise<Buffer> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+
+  for (const zeilen of seiten) {
+    const seite = doc.addPage([595.28, 841.89]);
+    zeilen.forEach((zeile, i) => {
+      seite.drawText(zeile, { x: 50, y: 700 - i * 16, size: 10, font });
+    });
+  }
+  return Buffer.from(await doc.save());
+}
+
+/** Einseitiger Beleg mit erkennbarem Text. */
+async function beschriftetesPdf(text: string): Promise<Buffer> {
+  return auszugMitText([[text]]);
 }
 
 function position(teil: Partial<Position> & { id: string }): Position {
@@ -69,7 +89,9 @@ describe('baueAbrechnungsPdf', () => {
     expect(await seitenzahl(pdf)).toBe(2);
   });
 
-  it('stellt die Kontoauszuege dem Journal voran', async () => {
+  it('haengt einen Auszug ohne Textebene unveraendert an', async () => {
+    // Ohne lesbaren Text laesst sich nicht sagen, welche Buchung auf welcher
+    // Seite steht - dann bleibt es bei der einfachen Reihenfolge.
     const auszug = await testPdf(3);
 
     const pdf = await baueAbrechnungsPdf({
@@ -82,8 +104,110 @@ describe('baueAbrechnungsPdf', () => {
       ladeDatei: async () => auszug,
     });
 
-    // Deckblatt(1) + Kontoauszug(3) + Journal(1)
+    // Deckblatt(1) + Journal(1) + Kontoauszug(3)
     expect(await seitenzahl(pdf)).toBe(5);
+  });
+
+  it('stellt die Belege hinter die Auszugsseite, auf der die Buchung steht', async () => {
+    /*
+     * Die Form, die der Steuerberater erwartet:
+     *   Auszugsseite 1 -> Belege der Buchungen von Seite 1
+     *   Auszugsseite 2 -> Belege der Buchungen von Seite 2
+     */
+    const auszug = await auszugMitText([
+      ['01.06.2026  Miete            1.200,00'],
+      ['15.06.2026  Telekom            595,17'],
+    ]);
+    const belege: Record<string, Buffer> = {
+      ka1: auszug,
+      'd-miete': await beschriftetesPdf('BELEG MIETE'),
+      'd-telekom': await beschriftetesPdf('BELEG TELEKOM'),
+    };
+
+    const pdf = await baueAbrechnungsPdf({
+      monat: monat({
+        positionen: [
+          position({
+            id: 'miete', datum: '2026-06-01', betrag: -1200,
+            dateien: [{ ...datei('d-miete'), dateiname: 'miete.pdf' }],
+          }),
+          position({
+            id: 'telekom', datum: '2026-06-15', betrag: -595.17,
+            dateien: [{ ...datei('d-telekom'), dateiname: 'telekom.pdf' }],
+          }),
+        ],
+        kontoauszuege: [
+          { id: 'ka1', dateiname: 'Auszug.pdf', groesse: 1, hochgeladenAm: '2026-07-01T00:00:00Z' },
+        ],
+      }),
+      ladeDatei: async (id) => belege[id]!,
+    });
+
+    // Deckblatt, Journal, Auszugsseite 1, Beleg Miete, Auszugsseite 2, Beleg Telekom
+    expect(await seitenzahl(pdf)).toBe(6);
+
+    const texte = await leseSeitentexte(pdf);
+    expect(texte[2]).toContain('1.200,00');
+    expect(texte[3]).toContain('BELEG MIETE');
+    expect(texte[4]).toContain('595,17');
+    expect(texte[5]).toContain('BELEG TELEKOM');
+  });
+
+  it('sammelt Belege ohne Seitenzuordnung hinter einem Trenner am Ende', async () => {
+    const auszug = await auszugMitText([['01.06.2026  Miete   1.200,00']]);
+    const belege: Record<string, Buffer> = {
+      ka1: auszug,
+      'd-miete': await beschriftetesPdf('BELEG MIETE'),
+      'd-bar': await beschriftetesPdf('BELEG BAR'),
+    };
+
+    const pdf = await baueAbrechnungsPdf({
+      monat: monat({
+        positionen: [
+          position({ id: 'miete', datum: '2026-06-01', betrag: -1200, dateien: [datei('d-miete')] }),
+          // Kommt auf dem Auszug nicht vor - etwa eine Barzahlung.
+          position({ id: 'bar', datum: '2026-06-09', betrag: -42.5, dateien: [datei('d-bar')] }),
+        ],
+        kontoauszuege: [
+          { id: 'ka1', dateiname: 'Auszug.pdf', groesse: 1, hochgeladenAm: '2026-07-01T00:00:00Z' },
+        ],
+      }),
+      ladeDatei: async (id) => belege[id]!,
+    });
+
+    const texte = await leseSeitentexte(pdf);
+    expect(texte[3]).toContain('BELEG MIETE');
+    expect(texte[4]).toContain('ohne Zuordnung');
+    expect(texte[5]).toContain('BELEG BAR');
+  });
+
+  it('nummeriert die Belege weiterhin nach dem Journal, nicht nach der Seite', async () => {
+    // Die Kopfzeile verbindet Beleg und Journal - sie darf sich durch die
+    // Verschachtelung nicht verschieben.
+    const auszug = await auszugMitText([['15.06.2026 Telekom 595,17'], ['01.06.2026 Miete 1.200,00']]);
+    const belege: Record<string, Buffer> = {
+      ka1: auszug,
+      'd-miete': await beschriftetesPdf('M'),
+      'd-telekom': await beschriftetesPdf('T'),
+    };
+
+    const pdf = await baueAbrechnungsPdf({
+      monat: monat({
+        positionen: [
+          position({ id: 'miete', datum: '2026-06-01', betrag: -1200, dateien: [datei('d-miete')] }),
+          position({ id: 'telekom', datum: '2026-06-15', betrag: -595.17, dateien: [datei('d-telekom')] }),
+        ],
+        kontoauszuege: [
+          { id: 'ka1', dateiname: 'Auszug.pdf', groesse: 1, hochgeladenAm: '2026-07-01T00:00:00Z' },
+        ],
+      }),
+      ladeDatei: async (id) => belege[id]!,
+    });
+
+    const texte = await leseSeitentexte(pdf);
+    // Auszugsseite 1 traegt Telekom -> dessen Beleg ist Position 2 im Journal.
+    expect(texte[3]).toContain('Pos. 2');
+    expect(texte[5]).toContain('Pos. 1');
   });
 
   it('haengt die Belegseiten aller Positionen an', async () => {

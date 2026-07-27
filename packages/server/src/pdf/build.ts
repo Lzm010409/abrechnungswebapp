@@ -1,22 +1,25 @@
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
 import type { Kontoauszug, Monat, Position } from '@abrechnung/shared';
+import { leseSeitentexte, ordneBuchungenSeitenZu } from './seitenzuordnung.js';
 
 /**
  * Baut das Abrechnungs-PDF.
  *
- * Aufbau:
+ * Mit Kontoauszug (die Form, die der Steuerberater erwartet):
  *   1. Deckblatt mit Summen und Statuszaehlern
- *   2. Kontoauszuege in der vom Nutzer gesetzten Reihenfolge
- *   3. Monatsjournal - alle Buchungen als Tabelle mit laufender Nummer
- *   4. Belege, gruppiert je Buchung in Journal-Reihenfolge;
- *      innerhalb eines Tages erst AUSGANG, dann EINGANG
+ *   2. Monatsjournal - alle Buchungen als Tabelle mit laufender Nummer
+ *   3. je Auszugsseite: die Seite selbst, dahinter die Belege zu genau den
+ *      Buchungen, die auf ihr stehen
+ *   4. Belege ohne Seitenzuordnung, gesammelt am Ende
  *
- * Abweichung zum urspruenglichen Skill: dort wurden die Belege hinter die
- * jeweilige Kontoauszugs-SEITE einsortiert. Das setzt voraus, dass bekannt ist,
- * welche Buchung auf welcher Seite steht - eine Information, die nur aus dem
- * OCR des Auszugs stammt und genau dort unzuverlaessig war. Stattdessen traegt
- * jede Belegseite eine Kopfzeile mit der Positionsnummer aus dem Journal, ueber
- * die sich Buchung und Beleg eindeutig verbinden lassen.
+ * Ohne Kontoauszug - oder wenn sich die Buchungen keiner Seite zuordnen
+ * lassen, etwa bei einem eingescannten Auszug ohne Textebene - bleibt es bei
+ * der einfachen Reihenfolge: erst alle Auszugsseiten, dann alle Belege. Eine
+ * geratene Zuordnung waere schlimmer als gar keine.
+ *
+ * Jede Belegseite traegt in beiden Faellen eine Kopfzeile mit der
+ * Positionsnummer aus dem Journal, ueber die sich Buchung und Beleg
+ * unabhaengig von der Reihenfolge verbinden lassen.
  */
 
 export interface PdfBauOptionen {
@@ -30,6 +33,12 @@ export interface PdfBauOptionen {
 const RAND = 50;
 const A4: [number, number] = [595.28, 841.89];
 
+/** Eine Buchung samt ihrer Nummer im Journal. */
+interface NummeriertePosition {
+  nummer: number;
+  position: Position;
+}
+
 export async function baueAbrechnungsPdf(opts: PdfBauOptionen): Promise<Buffer> {
   const { monat, ladeDatei } = opts;
   const doc = await PDFDocument.create();
@@ -41,12 +50,150 @@ export async function baueAbrechnungsPdf(opts: PdfBauOptionen): Promise<Buffer> 
     .filter((p) => p.status !== 'ignoriert')
     .sort(sortiereFuerAusgabe);
 
+  const nummeriert: NummeriertePosition[] = relevant.map((position, i) => ({
+    nummer: i + 1,
+    position,
+  }));
+
   zeichneDeckblatt(doc, monat, normal, fett, opts.buero);
-  await haengeKontoauszuegeAn(doc, monat.kontoauszuege, ladeDatei, normal);
   zeichneJournal(doc, relevant, normal, fett);
-  await haengeBelegeAn(doc, relevant, ladeDatei, normal);
+
+  const verschachtelt = await haengeAuszuegeMitBelegenAn(
+    doc,
+    monat.kontoauszuege,
+    nummeriert,
+    ladeDatei,
+    normal,
+    fett,
+  );
+
+  if (!verschachtelt) {
+    // Rueckfall: erst die Auszuege, dann alle Belege am Stueck.
+    await haengeKontoauszuegeAn(doc, monat.kontoauszuege, ladeDatei, normal);
+    await haengeBelegeAn(doc, nummeriert, ladeDatei, normal);
+  }
 
   return Buffer.from(await doc.save());
+}
+
+/**
+ * Haengt die Auszugsseiten an und stellt hinter jede die Belege der Buchungen,
+ * die auf ihr stehen. Gibt false zurueck, wenn das nicht moeglich war - dann
+ * uebernimmt der Aufrufer die einfache Reihenfolge.
+ */
+async function haengeAuszuegeMitBelegenAn(
+  doc: PDFDocument,
+  auszuege: Kontoauszug[],
+  positionen: NummeriertePosition[],
+  ladeDatei: (id: string) => Promise<Buffer>,
+  normal: PDFFont,
+  fett: PDFFont,
+): Promise<boolean> {
+  if (auszuege.length === 0) return false;
+
+  // Alle Auszuege hintereinander betrachten: die Seitennummern laufen ueber
+  // Dateigrenzen hinweg durch, damit die Zuordnung eindeutig bleibt.
+  const seiten: Array<{ auszug: Kontoauszug; bytes: Buffer; text: string }> = [];
+
+  for (const auszug of auszuege) {
+    let bytes: Buffer;
+    try {
+      bytes = await ladeDatei(auszug.id);
+    } catch {
+      continue;
+    }
+
+    const texte = await leseSeitentexte(bytes);
+    if (texte.length === 0) return false; // keine Textebene - nicht raten
+
+    const quelle = await PDFDocument.load(bytes, { ignoreEncryption: true }).catch(
+      () => null,
+    );
+    if (!quelle) return false;
+
+    for (const [i, text] of texte.entries()) {
+      const einzeln = await PDFDocument.create();
+      const [kopie] = await einzeln.copyPages(quelle, [i]);
+      einzeln.addPage(kopie!);
+      seiten.push({ auszug, bytes: Buffer.from(await einzeln.save()), text });
+    }
+  }
+
+  if (seiten.length === 0) return false;
+
+  const zuordnung = ordneBuchungenSeitenZu(
+    seiten.map((s) => s.text),
+    positionen.map((n) => n.position),
+  );
+
+  // Ordnet die Zuordnung niemandem eine Seite zu, bringt die Verschachtelung
+  // nichts - dann ist die einfache Form ehrlicher.
+  if (zuordnung.size === 0) return false;
+
+  for (const [i, seite] of seiten.entries()) {
+    const kopien = await kopiereSeiten(doc, seite.bytes);
+    for (const s of kopien) {
+      kopfzeile(s, `Kontoauszug ${i + 1}/${seiten.length} - ${seite.auszug.dateiname}`, normal);
+    }
+
+    const dazu = positionen.filter((n) => zuordnung.get(n.position.id) === i);
+    await haengeBelegeAn(doc, dazu, ladeDatei, normal);
+  }
+
+  const ohneSeite = positionen.filter((n) => !zuordnung.has(n.position.id));
+  if (ohneSeite.length > 0) {
+    zeichneTrenner(
+      doc,
+      'Belege ohne Zuordnung zu einer Auszugsseite',
+      `${ohneSeite.length} Buchung${ohneSeite.length === 1 ? '' : 'en'} liessen sich auf ` +
+        'keiner Seite des Kontoauszugs wiederfinden. Die Nummer in der Kopfzeile ' +
+        'verweist auf das Monatsjournal.',
+      normal,
+      fett,
+    );
+    await haengeBelegeAn(doc, ohneSeite, ladeDatei, normal);
+  }
+
+  return true;
+}
+
+/** Einzelne Seite als Abschnittstrenner. */
+function zeichneTrenner(
+  doc: PDFDocument,
+  titel: string,
+  text: string,
+  normal: PDFFont,
+  fett: PDFFont,
+): void {
+  const seite = doc.addPage(A4);
+  const { height } = seite.getSize();
+
+  seite.drawText(titel, { x: RAND, y: height / 2, size: 14, font: fett });
+
+  // Einfacher Umbruch an Wortgrenzen - der Trenner traegt nur zwei, drei Zeilen.
+  const maxBreite = A4[0] - 2 * RAND;
+  const zeilen: string[] = [];
+  let aktuell = '';
+  for (const wort of text.split(' ')) {
+    const versuch = aktuell ? `${aktuell} ${wort}` : wort;
+    if (normal.widthOfTextAtSize(versuch, 10) > maxBreite) {
+      zeilen.push(aktuell);
+      aktuell = wort;
+    } else {
+      aktuell = versuch;
+    }
+  }
+  if (aktuell) zeilen.push(aktuell);
+
+  for (const [i, zeile] of zeilen.entries()) {
+    seite.drawText(zeile, {
+      x: RAND,
+      y: height / 2 - 22 - i * 14,
+      size: 10,
+      font: normal,
+      color: rgb(0.4, 0.4, 0.4),
+    });
+  }
 }
 
 /**
@@ -259,11 +406,11 @@ function belegKuerzel(p: Position): string {
 
 async function haengeBelegeAn(
   doc: PDFDocument,
-  positionen: Position[],
+  positionen: NummeriertePosition[],
   ladeDatei: (id: string) => Promise<Buffer>,
   font: PDFFont,
 ): Promise<void> {
-  for (const [i, position] of positionen.entries()) {
+  for (const { nummer, position } of positionen) {
     for (const datei of position.dateien) {
       let bytes: Buffer;
       try {
@@ -273,7 +420,7 @@ async function haengeBelegeAn(
       }
 
       const beschriftung =
-        `Pos. ${i + 1}  |  ${deutschesDatum(position.datum)}  |  ${euro(position.betrag)}` +
+        `Pos. ${nummer}  |  ${deutschesDatum(position.datum)}  |  ${euro(position.betrag)}` +
         (position.aktenzeichen ? `  |  ${position.aktenzeichen.normalisiert}` : '') +
         `  |  ${datei.dateiname}`;
 

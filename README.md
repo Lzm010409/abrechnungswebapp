@@ -288,11 +288,23 @@ mehrdeutig oder in sevDesk unzugeordnet ist.
 Werden pro Monat hochgeladen und dem Abrechnungs-PDF direkt nach dem Deckblatt
 vorangestellt, in der in der UI sichtbaren Reihenfolge.
 
-Anders als im alten Skill werden die Belege **nicht** hinter die jeweilige
-Kontoauszugs-*Seite* einsortiert. Diese Zuordnung setzte voraus zu wissen,
-welche Buchung auf welcher Seite steht — eine Information, die nur aus dem OCR
-des Auszugs stammte und genau dort unzuverlässig war. Stattdessen trägt jede
-Belegseite eine Kopfzeile mit der Positionsnummer aus dem Monatsjournal:
+Die Belege werden hinter genau die Auszugs-*Seite* gestellt, auf der die
+zugehörige Buchung steht — die Form, die die Steuerberatung erwartet.
+
+Woher die Zuordnung kommt: gelesen wird die **Textebene** des Auszugs-PDF, nicht
+dessen Bild. Bank-Auszüge bringen die praktisch immer mit, ein OCR ist nicht
+nötig. Gesucht wird der Betrag in deutscher Schreibweise (mit und ohne
+Tausenderpunkt, Vorzeichen egal), das Buchungsdatum bestätigt den Treffer, falls
+derselbe Betrag mehrfach vorkommt. Ein Teilbetrag wird dabei nicht mit dem
+ganzen verwechselt: `5,17` trifft nicht in `595,17`.
+
+Was nicht zugeordnet werden kann, wird nicht geraten. Buchungen ohne Treffer —
+Barzahlungen etwa — landen hinter einem Trenner am Ende. Fehlt die Textebene
+ganz (eingescannter Auszug), bleibt es bei der einfachen Reihenfolge: erst alle
+Auszugsseiten, dann alle Belege.
+
+In jedem Fall trägt jede Belegseite eine Kopfzeile mit der Positionsnummer aus
+dem Monatsjournal:
 
 ```
 Pos. 7  |  03.06.2026  |  892,50 EUR  |  0626/1811TG01  |  0626_1811TG01_Rechnung.pdf
@@ -300,10 +312,16 @@ Pos. 7  |  03.06.2026  |  892,50 EUR  |  0626/1811TG01  |  0626_1811TG01_Rechnun
 
 ### Aufbau des Abrechnungs-PDFs
 
+Mit Kontoauszug:
+
 1. Deckblatt mit Summen, Statuszählern und Warnhinweis bei Unvollständigkeit
-2. Kontoauszüge
-3. Monatsjournal (alle Buchungen mit laufender Nummer)
-4. Belege in Buchungsreihenfolge; innerhalb eines Tages erst AUSGANG, dann EINGANG
+2. Monatsjournal (alle Buchungen mit laufender Nummer)
+3. je Auszugsseite: die Seite selbst, dahinter die Belege der Buchungen darauf
+4. Trenner, dahinter die Belege ohne Seitenzuordnung
+
+Ohne Kontoauszug (oder ohne lesbare Textebene) bleibt es bei Deckblatt →
+Journal → Auszugsseiten → alle Belege in Buchungsreihenfolge; innerhalb eines
+Tages erst AUSGANG, dann EINGANG.
 
 ---
 
@@ -327,7 +345,7 @@ Zweifelsfälle — Beträge, Verknüpfungen und Summen kommen aus sevDesk.
 npm test
 ```
 
-234 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+248 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 
@@ -383,6 +401,25 @@ abgesucht.
 Hinter einem Reverse-Proxy: der Lade-Stream braucht ungepufferte Antworten. Der
 Server setzt dafür `X-Accel-Buffering: no`; Traefik und Caddy respektieren das
 ohne weitere Einstellung.
+
+---
+
+## Geplant
+
+### Belege nach OneDrive einsortieren
+
+Nach Abschluss der Zuordnung sollen die Belege in die Monatsordner wandern:
+
+| Ordner | Inhalt |
+|---|---|
+| `Konto` | alles, was einer Kontoauszugsseite zugeordnet werden konnte |
+| `Tanken` | Tankbelege |
+| `Bar` | der Rest |
+
+Die Ordner-ID des jeweiligen Monats liefert ein noch einzurichtender
+n8n-Workflow; die Einteilung Konto/Bar ergibt sich bereits aus der
+Seitenzuordnung des Abrechnungs-PDFs, die Erkennung der Tankbelege aus dem
+Aussteller (KI-Extraktion oder eine Liste bekannter Tankstellenbetreiber).
 
 ---
 
