@@ -27,7 +27,7 @@ services:
       N8N_WEBHOOK_AUTH_VALUE: ${N8N_WEBHOOK_AUTH_VALUE:-}
       # Optional - kann jederzeit spaeter nachgetragen werden
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5}
       ANTHROPIC_EFFORT: ${ANTHROPIC_EFFORT:-high}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:

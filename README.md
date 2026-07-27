@@ -192,7 +192,7 @@ kommen immer aus sevDesk, nie aus dem Modell.
 
 **Wie:** Key unter <https://console.anthropic.com> erzeugen (Format `sk-ant-…`),
 als `ANTHROPIC_API_KEY` eintragen, Anwendung neu starten. Optional lassen sich
-`ANTHROPIC_MODEL` (Standard `claude-opus-5`) und `ANTHROPIC_EFFORT`
+`ANTHROPIC_MODEL` (Standard `claude-sonnet-5`) und `ANTHROPIC_EFFORT`
 (`low`…`max`, Standard `high`) setzen.
 
 Danach erscheinen in der Aktionsleiste die Schaltflächen **Belege auslesen** und
@@ -205,7 +205,7 @@ Prüfen, ob beides greift:
 
 ```
 GET /api/capabilities
-→ { "ki": true, "kiModell": "claude-opus-5", "n8nRechnungsabruf": true, … }
+→ { "ki": true, "kiModell": "claude-sonnet-5", "n8nRechnungsabruf": true, … }
 ```
 
 ---
@@ -364,7 +364,10 @@ Tages erst AUSGANG, dann EINGANG.
 
 ## KI-Funktionen
 
-Optional, Modell `claude-opus-5`. Das Modell entscheidet ausschließlich
+Optional, Modell `claude-sonnet-5`. Beide Aufgaben — Belegdaten auslesen und
+einen Monat auf Plausibilität prüfen — sind für Sonnet unkritisch; Opus kostet
+ein Vielfaches, ohne hier erkennbar besser zu sein. Wer es anders will, setzt
+`ANTHROPIC_MODEL`. Das Modell entscheidet ausschließlich
 Zweifelsfälle — Beträge, Verknüpfungen und Summen kommen aus sevDesk.
 
 Beide länger laufenden Funktionen melden ihren Fortschritt als Ereignisstrom,

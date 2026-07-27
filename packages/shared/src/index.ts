@@ -267,6 +267,14 @@ export type LadePhase =
 
 export interface LadeFortschritt {
   phase: LadePhase;
+  /**
+   * Kennung des Schritts innerhalb der Phase. Mehrere Schritte derselben Phase
+   * erscheinen als eigene Zeilen; ein erneuter Stand mit derselben Kennung
+   * aktualisiert die vorhandene.
+   */
+  schritt?: string;
+  /** Ueberschrift der Zeile. Ohne Angabe steht dort der Name der Phase. */
+  titel?: string;
   /** Kurzer Text fuer die Oberflaeche */
   text: string;
   /** Bei zaehlbaren Phasen der Stand, sonst offen */

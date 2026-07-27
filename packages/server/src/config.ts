@@ -206,7 +206,10 @@ export function ladeConfig(): Config {
     anthropic: anthropicKey
       ? {
           apiKey: anthropicKey,
-          modell: env('ANTHROPIC_MODEL') ?? 'claude-opus-5',
+          // Sonnet reicht fuer beide Aufgaben: Belegdaten auslesen und einen
+          // Monat auf Plausibilitaet pruefen. Opus kostet ein Vielfaches, ohne
+          // hier erkennbar besser zu sein - wer will, setzt ANTHROPIC_MODEL.
+          modell: env('ANTHROPIC_MODEL') ?? 'claude-sonnet-5',
           effort: leseEffort(),
           baseUrl: env('ANTHROPIC_BASE_URL'),
         }

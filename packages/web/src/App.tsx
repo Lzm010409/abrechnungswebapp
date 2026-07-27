@@ -3,7 +3,6 @@ import type {
   AblageErgebnis,
   Capabilities,
   LadeFortschritt,
-  LadePhase,
   Markierung,
   Monat,
   MonatsReview,
@@ -23,6 +22,7 @@ import { Kontoauszuege } from './components/Kontoauszuege';
 import { Ladefortschritt } from './components/Ladefortschritt';
 import { PositionenTabelle } from './components/PositionenTabelle';
 import { Sammelaktionen } from './components/Sammelaktionen';
+import { Vorgangsanzeige } from './components/Vorgangsanzeige';
 
 export function App() {
   const [monat, setMonat] = useState(() => verschiebeMonat(aktuellerMonat(), -1));
@@ -31,14 +31,15 @@ export function App() {
   const [ausgewaehlt, setAusgewaehlt] = useState<string>();
   const [review, setReview] = useState<MonatsReview>();
   const [laedt, setLaedt] = useState(false);
-  const [phasen, setPhasen] = useState<Map<LadePhase, LadeFortschritt>>(new Map());
+  const [phasen, setPhasen] = useState<Map<string, LadeFortschritt>>(new Map());
   const [ablage, setAblage] = useState<AblageErgebnis>();
   /** Angehakte Zeilen fuer Sammelaktionen */
   const [markiert, setMarkiert] = useState<Set<string>>(new Set());
   /** Laufender KI-Vorgang samt Fortschritt - undefined heisst: nichts laeuft */
   const [vorgang, setVorgang] = useState<{
     titel: string;
-    phasen: Map<LadePhase, LadeFortschritt>;
+    hinweis?: string;
+    phasen: Map<string, LadeFortschritt>;
   }>();
   const [meldung, setMeldung] = useState<string>();
   const [fehler, setFehler] = useState<string>();
@@ -65,7 +66,10 @@ export function App() {
             case 'fortschritt':
               setPhasen((alt) => {
                 const neu = new Map(alt);
-                neu.set(ereignis.fortschritt.phase, ereignis.fortschritt);
+                neu.set(
+                  ereignis.fortschritt.schritt ?? ereignis.fortschritt.phase,
+                  ereignis.fortschritt,
+                );
                 return neu;
               });
               break;
@@ -121,18 +125,19 @@ export function App() {
    */
   const mitVorgang = async <T,>(
     titel: string,
+    hinweis: string,
     arbeit: (melde: (f: LadeFortschritt) => void) => Promise<T>,
     danach: (ergebnis: T) => void,
   ) => {
-    setVorgang({ titel, phasen: new Map() });
+    setVorgang({ titel, hinweis, phasen: new Map() });
     setFehler(undefined);
     setMeldung(undefined);
     try {
       const ergebnis = await arbeit((fortschritt) =>
         setVorgang((alt) => {
           const phasen = new Map(alt?.phasen);
-          phasen.set(fortschritt.phase, fortschritt);
-          return { titel, phasen };
+          phasen.set(fortschritt.schritt ?? fortschritt.phase, fortschritt);
+          return { titel, hinweis, phasen };
         }),
       );
       danach(ergebnis);
@@ -268,19 +273,19 @@ export function App() {
         />
       )}
 
+      {vorgang && (
+        <Vorgangsanzeige
+          titel={vorgang.titel}
+          phasen={vorgang.phasen}
+          hinweis={vorgang.hinweis}
+        />
+      )}
+
       <main>
         <div className="liste">
           {laedt && <Ladefortschritt phasen={phasen} laeuft={laedt} />}
 
-          {vorgang && (
-            <section className="vorgang">
-              <h4>
-                <span className="spinner" aria-hidden="true" />
-                {vorgang.titel}
-              </h4>
-              <Ladefortschritt phasen={vorgang.phasen} laeuft />
-            </section>
-          )}
+
           {daten && (
             <PositionenTabelle
               positionen={daten.positionen}
@@ -376,6 +381,8 @@ export function App() {
               onClick={() =>
                 mitVorgang(
                   'Belege werden ausgelesen',
+                  'Jeder Beleg geht einmal an das Modell. Schon gelesene Belege ' +
+                    'sind zwischengespeichert und kosten nichts.',
                   (melde) => api.ki.extrahiere(monat, melde),
                   ({ neuAnalysiert, monat: neu }) => {
                     setDaten(neu);
@@ -397,6 +404,8 @@ export function App() {
               onClick={() =>
                 mitVorgang(
                   'Der Monat wird geprüft',
+                  'Ein einzelner Durchgang über alle Buchungen – das dauert ' +
+                    'meist unter einer Minute.',
                   (melde) => api.ki.pruefe(monat, melde),
                   setReview,
                 )
@@ -411,21 +420,55 @@ export function App() {
 
         <button
           className="primaer"
-          disabled={laedt || !daten}
+          disabled={laedt || Boolean(vorgang) || !daten}
           onClick={() =>
-            mitLadeanzeige(async () => {
-              const blob = await api.erzeugeBericht(monat);
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = `Abrechnung_${monat}.pdf`;
-              a.click();
-              URL.revokeObjectURL(url);
+            mitVorgang(
+              'Abrechnung wird zusammengestellt',
+              'Deckblatt, Journal, Kontoauszüge und alle Belegseiten werden zu ' +
+                'einem PDF verbunden.',
+              async (melde) => {
+                /*
+                 * Der Bau laeuft in einer Anfrage - Fortschritt von innen gibt
+                 * es nicht. Gemeldet werden deshalb die beiden Abschnitte, die
+                 * der Browser selbst kennt. Besser als ein Knopf, bei dem
+                 * scheinbar nichts passiert.
+                 */
+                melde({
+                  phase: 'dateien',
+                  schritt: 'pdf',
+                  titel: 'PDF wird gebaut',
+                  text: 'Belege werden hinter die Auszugsseiten einsortiert',
+                });
 
-              // Die Einteilung steht erst jetzt fest - sie haengt daran, welche
-              // Buchung sich auf einer Kontoauszugsseite wiederfindet.
-              setAblage(await api.ablage(monat));
-            })
+                const blob = await api.erzeugeBericht(monat);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `Abrechnung_${monat}.pdf`;
+                a.click();
+                URL.revokeObjectURL(url);
+
+                melde({
+                  phase: 'dateien',
+                  schritt: 'pdf',
+                  titel: 'PDF wird gebaut',
+                  text: 'heruntergeladen',
+                  erledigt: 1,
+                  gesamt: 1,
+                });
+                melde({
+                  phase: 'dateien',
+                  schritt: 'einteilung',
+                  titel: 'Belege werden eingeteilt',
+                  text: 'Konto, Bar und Tanken',
+                });
+
+                // Die Einteilung steht erst jetzt fest - sie haengt daran, welche
+                // Buchung sich auf einer Kontoauszugsseite wiederfindet.
+                return api.ablage(monat);
+              },
+              setAblage,
+            )
           }
         >
           Abrechnungs-PDF erzeugen

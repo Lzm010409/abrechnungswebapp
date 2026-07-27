@@ -438,15 +438,38 @@ export async function registriereRouten(
     melde: (f: LadeFortschritt) => void,
   ): Promise<{ neuAnalysiert: number; monat: Monat }> => {
     const ki = brauchtKi(ctx);
-    const daten = await ctx.monate.lade(monat);
-
-    const zuLesen = daten.positionen.filter(
-      (p) => p.dateien[0]?.mimeType.includes('pdf'),
-    );
 
     melde({
       phase: 'ki-belege',
-      text: `${zuLesen.length} Belege werden gelesen`,
+      schritt: 'sammeln',
+      titel: 'Belege zusammenstellen',
+      text: 'Der Monat wird aus dem Zwischenspeicher geholt',
+    });
+
+    const daten = await ctx.monate.lade(monat);
+    const zuLesen = daten.positionen.filter(
+      (p) => p.dateien[0]?.mimeType.includes('pdf'),
+    );
+    const schonGelesen = zuLesen.filter((p) =>
+      ctx.db.ladeExtraktion(p.dateien[0]!.id),
+    ).length;
+
+    melde({
+      phase: 'ki-belege',
+      schritt: 'sammeln',
+      titel: 'Belege zusammenstellen',
+      text:
+        `${zuLesen.length} Belege im Monat` +
+        (schonGelesen > 0 ? `, davon ${schonGelesen} bereits gelesen` : ''),
+      erledigt: zuLesen.length,
+      gesamt: zuLesen.length,
+    });
+
+    melde({
+      phase: 'ki-belege',
+      schritt: 'lesen',
+      titel: 'Belege werden gelesen',
+      text: zuLesen.length === schonGelesen ? 'nichts Neues zu lesen' : 'los geht es',
       erledigt: 0,
       gesamt: zuLesen.length,
     });
@@ -472,11 +495,20 @@ export async function registriereRouten(
 
       melde({
         phase: 'ki-belege',
+        schritt: 'lesen',
+        titel: 'Belege werden gelesen',
         text: datei.dateiname,
         erledigt: i + 1,
         gesamt: zuLesen.length,
       });
     }
+
+    melde({
+      phase: 'ki-belege',
+      schritt: 'uebernehmen',
+      titel: 'Ergebnisse übernehmen',
+      text: neu === 0 ? 'alle Belege waren bereits gelesen' : `${neu} neu ausgelesen`,
+    });
 
     return { neuAnalysiert: neu, monat: await ctx.monate.lade(monat) };
   };
@@ -563,14 +595,48 @@ export async function registriereRouten(
 
       return alsStrom(req, reply, async (melde) => {
         const ki = brauchtKi(ctx);
-        const daten = await ctx.monate.lade(monat);
 
         melde({
           phase: 'ki-pruefung',
-          text: `${daten.positionen.length} Buchungen werden auf Dubletten, Betragsabweichungen und Lücken geprüft`,
+          schritt: 'sammeln',
+          titel: 'Monat zusammenstellen',
+          text: 'Buchungen, Belege und bisherige Korrekturen',
+        });
+
+        const daten = await ctx.monate.lade(monat);
+        const mitBeleg = daten.positionen.filter((p) => p.dateien.length > 0).length;
+        const ausgelesen = daten.positionen.filter((p) => p.extraktion).length;
+
+        melde({
+          phase: 'ki-pruefung',
+          schritt: 'sammeln',
+          titel: 'Monat zusammenstellen',
+          text: `${daten.positionen.length} Buchungen, ${mitBeleg} mit Beleg, ${ausgelesen} ausgelesen`,
+          erledigt: 1,
+          gesamt: 1,
+        });
+
+        melde({
+          phase: 'ki-pruefung',
+          schritt: 'modell',
+          titel: 'Prüfung läuft',
+          text: 'Dubletten, Betragsabweichungen, USt-Plausibilität, fehlende Belege',
         });
 
         const review = await ki.pruefeMonat(monat, daten.positionen);
+
+        melde({
+          phase: 'ki-pruefung',
+          schritt: 'befunde',
+          titel: 'Befunde werden übernommen',
+          // Defensiv: liefert das Modell eine unvollstaendige Antwort, soll
+          // daran nicht die Fortschrittsmeldung scheitern.
+          text:
+            (review.auffaelligkeiten?.length ?? 0) === 0
+              ? 'keine Auffälligkeiten'
+              : `${review.auffaelligkeiten.length} Auffälligkeit(en)`,
+        });
+
         ctx.db.speichereReview(monat, review);
         return review;
       });

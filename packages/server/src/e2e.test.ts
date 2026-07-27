@@ -1339,9 +1339,14 @@ describe('End-to-End: gesamte Programmkette', () => {
         .filter((e) => e.art === 'fortschritt')
         .map((e) => (e.art === 'fortschritt' ? e.fortschritt : undefined)!);
 
-      // Ankuendigung plus je ein Stand nach jedem Beleg.
-      expect(staende[0]).toMatchObject({ phase: 'ki-belege', erledigt: 0, gesamt: 2 });
-      expect(staende.at(-1)).toMatchObject({ erledigt: 2, gesamt: 2 });
+      // Erst das Zusammenstellen, dann je ein Stand nach jedem Beleg.
+      expect(staende[0]).toMatchObject({ schritt: 'sammeln' });
+      expect(staende.map((f) => f.schritt)).toContain('lesen');
+      expect(staende.filter((f) => f.schritt === 'lesen').at(-1)).toMatchObject({
+        erledigt: 2,
+        gesamt: 2,
+      });
+      expect(staende.at(-1)).toMatchObject({ schritt: 'uebernehmen' });
 
       const letztes = ereignisse.at(-1)!;
       expect(letztes.art).toBe('fertig');
@@ -1369,11 +1374,14 @@ describe('End-to-End: gesamte Programmkette', () => {
         ).payload,
       );
 
-      const erstes = ereignisse[0]!;
-      expect(erstes.art).toBe('fortschritt');
-      expect((erstes as { fortschritt: { phase: string } }).fortschritt.phase).toBe(
-        'ki-pruefung',
-      );
+      const schritte = ereignisse
+        .filter((e) => e.art === 'fortschritt')
+        .map((e) => (e.art === 'fortschritt' ? e.fortschritt.schritt : undefined));
+
+      // Mehrere benannte Schritte statt einer nichtssagenden Zeile.
+      expect(schritte).toContain('sammeln');
+      expect(schritte).toContain('modell');
+      expect(schritte).toContain('befunde');
       expect(ereignisse.at(-1)!.art).toBe('fertig');
     });
 
