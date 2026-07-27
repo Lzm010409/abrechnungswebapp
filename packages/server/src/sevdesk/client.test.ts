@@ -218,11 +218,11 @@ describe('Fehlerbehandlung', () => {
     ).rejects.toMatchObject({ name: 'SevDeskFehler', status: 403 });
   });
 
-  it('liefert null statt zu scheitern, wenn ein Beleg keine Datei hat', async () => {
+  it('liefert nichts statt zu scheitern, wenn ein Beleg keine Datei hat', async () => {
     const fetchImpl = vi.fn(async () => antwort(null));
-    const datei = await baueClient(fetchImpl as unknown as typeof fetch)
-      .holeVoucherDatei('v-1');
-    expect(datei).toBeNull();
+    expect(
+      await baueClient(fetchImpl as unknown as typeof fetch).holeVoucherDateien('v-1'),
+    ).toEqual([]);
   });
 
   it('behandelt einen 404 beim Rechnungs-PDF als "nicht vorhanden"', async () => {
@@ -257,8 +257,8 @@ describe('Fehlerbehandlung', () => {
       }),
     );
 
-    const datei = await baueClient(fetchImpl as unknown as typeof fetch)
-      .holeVoucherDatei('v-1');
+    const [datei] = await baueClient(fetchImpl as unknown as typeof fetch)
+      .holeVoucherDateien('v-1');
 
     expect(datei!.daten.equals(inhalt)).toBe(true);
     expect(datei!.dateiname).toBe('beleg.pdf');

@@ -284,11 +284,11 @@ export class SevDeskClient {
    * bedingungslose Aufruf von res.json() ist an einem "%PDF-1.4" zerbrochen
    * und hat den kompletten Belegabruf scheitern lassen.
    */
-  private async holeDatei(
+  private async holeDateien(
     pfad: string,
     query: Record<string, string | number | undefined>,
     standardName: string,
-  ): Promise<Datei | null> {
+  ): Promise<Datei[]> {
     const url = new URL(`${this.baseUrl}${pfad}`);
     for (const [k, v] of Object.entries(query)) {
       if (v !== undefined) url.searchParams.set(k, String(v));
@@ -305,7 +305,7 @@ export class SevDeskClient {
           },
         });
 
-        if (res.status === 404) return null;
+        if (res.status === 404) return [];
 
         if ((res.status === 429 || res.status >= 500) && versuch < this.maxRetries) {
           await warte(2 ** versuch * 500);
@@ -326,7 +326,7 @@ export class SevDeskClient {
         const rohdaten = Buffer.from(await res.arrayBuffer());
         const kopfName = dateinameAusHeader(res.headers.get('content-disposition'));
 
-        return this.deuteDatei(rohdaten, contentType, kopfName ?? standardName);
+        return this.deuteDateien(rohdaten, contentType, kopfName ?? standardName);
       } catch (err) {
         letzterFehler = err;
         if (err instanceof SevDeskFehler) throw err;
@@ -352,60 +352,74 @@ export class SevDeskClient {
    * PDF-Betrachter kam dann "Datei kann nicht geoeffnet werden", weil dort
    * schlicht Text stand statt eines PDF.
    */
-  private deuteDatei(
+  private deuteDateien(
     rohdaten: Buffer,
     contentType: string,
     dateiname: string,
-  ): Datei | null {
-    if (rohdaten.byteLength === 0) return null;
+  ): Datei[] {
+    if (rohdaten.byteLength === 0) return [];
 
     if (siehtNachJsonAus(rohdaten)) {
-      return this.leseJsonDatei(rohdaten, dateiname);
+      return this.leseJsonDateien(rohdaten, dateiname);
     }
 
     const signatur = erkenneSignatur(rohdaten);
     if (signatur) {
-      return { daten: rohdaten, dateiname, mimeType: signatur };
+      return [{ daten: rohdaten, dateiname, mimeType: signatur }];
     }
 
     // Keine bekannte Signatur - also womoeglich base64-Text.
     const dekodiert = dekodiereBase64(rohdaten);
     if (dekodiert) {
-      return {
-        daten: dekodiert,
-        dateiname,
-        mimeType: erkenneSignatur(dekodiert) ?? 'application/pdf',
-      };
+      return [
+        {
+          daten: dekodiert,
+          dateiname,
+          mimeType: erkenneSignatur(dekodiert) ?? 'application/pdf',
+        },
+      ];
     }
 
     // Unbekanntes Format. Ausliefern statt verwerfen - moeglicherweise ein
     // Format, dessen Signatur hier nur nicht hinterlegt ist.
-    return {
-      daten: rohdaten,
-      dateiname,
-      mimeType: contentType.split(';')[0]?.trim() || 'application/octet-stream',
-    };
+    return [
+      {
+        daten: rohdaten,
+        dateiname,
+        mimeType: contentType.split(';')[0]?.trim() || 'application/octet-stream',
+      },
+    ];
   }
 
   /**
    * Wertet die JSON-Variante aus. sevDesk legt den Inhalt je nach Endpunkt
    * unter objects.content ab oder gibt objects direkt als Base64-String zurueck.
    */
-  private leseJsonDatei(rohdaten: Buffer, standardName: string): Datei | null {
+  /**
+   * Wertet die JSON-Variante aus - und zwar vollstaendig.
+   *
+   * Ein Beleg besteht nicht immer aus einer Datei: gescannte Tankquittungen
+   * kommen als zwei Seiten, gelegentlich in der Reihenfolge Rueckseite,
+   * Vorderseite. Frueher wurde nur der erste Fund genommen, womit die zweite
+   * Seite im Abrechnungs-PDF schlicht fehlte.
+   */
+  private leseJsonDateien(rohdaten: Buffer, standardName: string): Datei[] {
     let geparst: unknown;
     try {
       geparst = JSON.parse(rohdaten.toString('utf8'));
     } catch {
       // Sah nach JSON aus, war aber keines - dann eben als Datei behandeln.
-      return {
-        daten: rohdaten,
-        dateiname: standardName,
-        mimeType: erkenneSignatur(rohdaten) ?? 'application/octet-stream',
-      };
+      return [
+        {
+          daten: rohdaten,
+          dateiname: standardName,
+          mimeType: erkenneSignatur(rohdaten) ?? 'application/octet-stream',
+        },
+      ];
     }
 
-    const fund = sucheDateiInhalt(geparst);
-    if (!fund) {
+    const funde = sucheDateiInhalte(geparst);
+    if (funde.length === 0) {
       // Kein leeres Ergebnis stillschweigend hinnehmen: ohne diese Meldung
       // faellt eine geaenderte Antwortform erst auf, wenn ein ganzer Monat
       // ohne Belege dasteht.
@@ -413,21 +427,27 @@ export class SevDeskClient {
         { struktur: beschreibeStruktur(geparst) },
         'sevDesk lieferte eine Dateiantwort ohne erkennbaren Inhalt',
       );
-      return null;
+      return [];
     }
 
-    return {
+    return funde.map((fund, i) => ({
       daten: fund.daten,
-      dateiname: fund.dateiname ?? standardName,
+      dateiname: fund.dateiname ?? nummeriere(standardName, i, funde.length),
       // Die Signatur schlaegt die Angabe: sevDesk hat PDFs schon als
       // "image/..." ausgewiesen, was die Anzeige im Browser gekostet hat.
       mimeType: erkenneSignatur(fund.daten) ?? fund.mimeType ?? 'application/pdf',
-    };
+    }));
   }
 
-  /** Belegdatei eines Vouchers, oder null wenn keine angehaengt ist. */
-  async holeVoucherDatei(voucherId: string): Promise<Datei | null> {
-    return this.holeDatei(
+  /**
+   * Alle Belegdateien eines Vouchers - leer, wenn keine angehaengt ist.
+   *
+   * Bewusst alle: ein Beleg kann aus mehreren Scans bestehen (Vorder- und
+   * Rueckseite einer Tankquittung), und im Abrechnungs-PDF muessen sie
+   * vollstaendig ankommen.
+   */
+  async holeVoucherDateien(voucherId: string): Promise<Datei[]> {
+    return this.holeDateien(
       `/Voucher/${voucherId}/getDocumentImage`,
       {},
       `beleg-${voucherId}.pdf`,
@@ -436,11 +456,20 @@ export class SevDeskClient {
 
   /** Ausgangsrechnung als PDF - Fallback, wenn n8n/OneDrive nichts liefert. */
   async holeRechnungsPdf(invoiceId: string): Promise<Datei | null> {
-    return this.holeDatei(
+    return this.eineDatei(
       `/Invoice/${invoiceId}/getPdf`,
       { download: 'false' },
       `rechnung-${invoiceId}.pdf`,
     );
+  }
+
+  /** Erste Datei oder null - fuer Endpunkte, die nur eine liefern koennen. */
+  private async eineDatei(
+    pfad: string,
+    query: Record<string, string | number | undefined>,
+    standardName: string,
+  ): Promise<Datei | null> {
+    return (await this.holeDateien(pfad, query, standardName))[0] ?? null;
   }
 }
 
@@ -496,23 +525,19 @@ const TYPFELDER = ['mimeType', 'mimetype', 'contentType', 'type'];
  * ausfallen lassen. Entschieden wird deshalb am Inhalt - gesucht wird die
  * erste Zeichenkette, aus der sich eine Datei mit bekannter Signatur ergibt.
  */
-function sucheDateiInhalt(wert: unknown, tiefe = 0): DateiFund | undefined {
-  if (tiefe > 6 || wert === null || wert === undefined) return undefined;
+function sucheDateiInhalte(wert: unknown, tiefe = 0): DateiFund[] {
+  if (tiefe > 6 || wert === null || wert === undefined) return [];
 
   if (typeof wert === 'string') {
     const daten = zuDatei(wert);
-    return daten ? { daten } : undefined;
+    return daten ? [{ daten }] : [];
   }
 
   if (Array.isArray(wert)) {
-    for (const eintrag of wert) {
-      const fund = sucheDateiInhalt(eintrag, tiefe + 1);
-      if (fund) return fund;
-    }
-    return undefined;
+    return wert.flatMap((eintrag) => sucheDateiInhalte(eintrag, tiefe + 1));
   }
 
-  if (typeof wert !== 'object') return undefined;
+  if (typeof wert !== 'object') return [];
   const objekt = wert as Record<string, unknown>;
 
   const dateiname = ersterString(objekt, NAMENSFELDER);
@@ -524,16 +549,35 @@ function sucheDateiInhalt(wert: unknown, tiefe = 0): DateiFund | undefined {
     if (typeof inhalt !== 'string' || inhalt.length === 0) continue;
 
     const daten = zuDatei(inhalt) ?? inhaltZuBuffer(inhalt, objekt.base64encoded as never);
-    if (daten.byteLength > 0) return { daten, dateiname, mimeType };
+    if (daten.byteLength > 0) return [{ daten, dateiname, mimeType }];
   }
 
-  // Danach der Rest der Struktur.
-  for (const inhalt of Object.values(objekt)) {
-    const fund = sucheDateiInhalt(inhalt, tiefe + 1);
-    if (fund) return { dateiname, mimeType, ...fund };
-  }
+  // Danach der Rest der Struktur - dort koennen mehrere Seiten liegen.
+  const funde = Object.values(objekt).flatMap((inhalt) =>
+    sucheDateiInhalte(inhalt, tiefe + 1),
+  );
 
-  return undefined;
+  return entdopple(funde.map((fund) => ({ dateiname, mimeType, ...fund })));
+}
+
+/** Dieselbe Datei kann in der Antwort mehrfach auftauchen. */
+function entdopple(funde: DateiFund[]): DateiFund[] {
+  const gesehen = new Set<string>();
+  return funde.filter((fund) => {
+    const schluessel = `${fund.daten.byteLength}:${fund.daten.subarray(0, 64).toString('base64')}`;
+    if (gesehen.has(schluessel)) return false;
+    gesehen.add(schluessel);
+    return true;
+  });
+}
+
+/** "beleg-7.pdf" -> "beleg-7 (2 von 3).pdf", wenn mehrere Seiten kommen. */
+function nummeriere(standardName: string, i: number, gesamt: number): string {
+  if (gesamt <= 1) return standardName;
+  const punkt = standardName.lastIndexOf('.');
+  const rumpf = punkt > 0 ? standardName.slice(0, punkt) : standardName;
+  const endung = punkt > 0 ? standardName.slice(punkt) : '';
+  return `${rumpf} (${i + 1} von ${gesamt})${endung}`;
 }
 
 /** Zeichenkette -> Datei, aber nur bei erkennbarer Signatur. */

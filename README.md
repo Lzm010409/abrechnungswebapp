@@ -22,6 +22,7 @@ sevDesk /CheckAccountTransaction        Buchungen des Monats
                                         sonst aus dem Verwendungszweck
                     ↓
         Belegdateien                    AUSGANG → /Voucher/{id}/getDocumentImage
+                                                  (alle Seiten, nicht nur die erste)
                                         EINGANG → n8n → OneDrive-Gutachtenordner
                                                   (Fallback /Invoice/{id}/getPdf)
                     ↓
@@ -397,7 +398,7 @@ Antwort.
 npm test
 ```
 
-303 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+307 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 

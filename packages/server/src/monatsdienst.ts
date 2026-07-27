@@ -296,18 +296,28 @@ export class MonatsDienst {
     const { sevdesk, rechnungen, ablage } = this.deps;
 
     if (position.typ === 'AUSGANG' && position.voucherId) {
-      const datei = await sevdesk.holeVoucherDatei(position.voucherId);
-      if (!datei) {
+      // Alle Seiten, nicht nur die erste: ein Beleg kann aus mehreren Scans
+      // bestehen - Vorder- und Rueckseite einer Tankquittung etwa, mitunter in
+      // dieser Reihenfolge eingescannt. Es gehoeren alle in die Abrechnung.
+      const dateien = await sevdesk.holeVoucherDateien(position.voucherId);
+      if (dateien.length === 0) {
         return { ...position, hinweis: 'Beleg in sevDesk ohne angehaengte Datei' };
       }
-      const abgelegt = await ablage.speichere(
-        monat,
-        datei.daten,
-        datei.dateiname,
-        'sevdesk-voucher',
-        datei.mimeType,
-      );
-      return { ...position, dateien: [abgelegt], hinweis: undefined };
+
+      const abgelegt: BelegDatei[] = [];
+      for (const datei of dateien) {
+        abgelegt.push(
+          await ablage.speichere(
+            monat,
+            datei.daten,
+            datei.dateiname,
+            'sevdesk-voucher',
+            datei.mimeType,
+          ),
+        );
+      }
+
+      return { ...position, dateien: abgelegt, hinweis: undefined };
     }
 
     if (position.typ === 'EINGANG' && position.aktenzeichen) {
