@@ -222,7 +222,7 @@ export function App() {
             <Kontoauszuege
               monat={monat}
               auszuege={daten.kontoauszuege}
-              onAenderung={() => void laden()}
+              onAenderung={(neu) => (neu ? setDaten(neu) : void laden())}
               onFehler={setFehler}
             />
           )}
@@ -276,7 +276,7 @@ export function App() {
           monat={monat}
           position={position}
           faehigkeiten={faehigkeiten}
-          onAenderung={() => void laden()}
+          onAenderung={(neu) => (neu ? setDaten(neu) : void laden())}
           onFehler={setFehler}
         />
       </main>

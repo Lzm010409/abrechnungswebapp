@@ -1,11 +1,11 @@
 import { useRef, useState } from 'react';
-import type { Kontoauszug } from '@abrechnung/shared';
+import type { Kontoauszug, Monat } from '@abrechnung/shared';
 import { api } from '../api/client';
 
 interface Props {
   monat: string;
   auszuege: Kontoauszug[];
-  onAenderung: () => void;
+  onAenderung: (monat?: Monat) => void;
   onFehler: (meldung: string) => void;
 }
 
@@ -21,11 +21,12 @@ export function Kontoauszuege({ monat, auszuege, onAenderung, onFehler }: Props)
     setLaedt(true);
     try {
       // Nacheinander, damit die Reihenfolge der Auswahl erhalten bleibt.
+      let letzter;
       for (const datei of Array.from(dateien)) {
-        await api.ladeKontoauszugHoch(monat, datei);
+        letzter = await api.ladeKontoauszugHoch(monat, datei);
       }
       if (feld.current) feld.current.value = '';
-      onAenderung();
+      onAenderung(letzter);
     } catch (err) {
       onFehler(err instanceof Error ? err.message : String(err));
     } finally {
@@ -57,8 +58,7 @@ export function Kontoauszuege({ monat, auszuege, onAenderung, onFehler }: Props)
                 onClick={async () => {
                   setLaedt(true);
                   try {
-                    await api.loescheKontoauszug(monat, a.id);
-                    onAenderung();
+                    onAenderung(await api.loescheKontoauszug(monat, a.id));
                   } catch (err) {
                     onFehler(err instanceof Error ? err.message : String(err));
                   } finally {

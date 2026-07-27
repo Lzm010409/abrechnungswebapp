@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Capabilities, Position } from '@abrechnung/shared';
+import type { Capabilities, Monat, Position } from '@abrechnung/shared';
 import { api, deutschesDatum, euro } from '../api/client';
 
 /**
@@ -18,11 +18,25 @@ function istBild(datei: { mimeType: string; dateiname: string }): boolean {
   return false;
 }
 
+/** Erkennt die Monatsantwort, ohne sie zu erraten. */
+function istMonat(wert: unknown): wert is Monat {
+  return (
+    typeof wert === 'object' &&
+    wert !== null &&
+    Array.isArray((wert as Monat).positionen) &&
+    typeof (wert as Monat).monat === 'string'
+  );
+}
+
 interface Props {
   monat: string;
   position?: Position;
   faehigkeiten?: Capabilities;
-  onAenderung: () => void;
+  /**
+   * Bekommt den fertigen Monat, wenn die Aenderung ihn zurueckgeliefert hat.
+   * Ohne Argument muss der Aufrufer selbst nachladen.
+   */
+  onAenderung: (monat?: Monat) => void;
   onFehler: (meldung: string) => void;
 }
 
@@ -61,8 +75,11 @@ export function Detailbereich({
   const fuehreAus = async (arbeit: () => Promise<unknown>) => {
     setLaedt(true);
     try {
-      await arbeit();
-      onAenderung();
+      // Die Aenderungs-Endpunkte liefern den fertigen Monat zurueck. Ihn zu
+      // verwenden erspart einen kompletten Neuabruf - der hat beim Markieren
+      // jedes Mal die Belegpruefung mitlaufen lassen.
+      const ergebnis = await arbeit();
+      onAenderung(istMonat(ergebnis) ? ergebnis : undefined);
     } catch (err) {
       onFehler(err instanceof Error ? err.message : String(err));
     } finally {

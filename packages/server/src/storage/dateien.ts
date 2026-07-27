@@ -4,6 +4,7 @@ import { mkdir, open, readFile, stat, unlink, writeFile } from 'node:fs/promises
 import { join, resolve } from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import type { BelegDatei, BelegQuelle } from '@abrechnung/shared';
+import { erkenneSignatur } from '../sevdesk/client.js';
 
 /**
  * Dateiablage fuer heruntergeladene Belege, hochgeladene Kontoauszuege und
@@ -92,14 +93,18 @@ export class Dateiablage {
    * nichts Nennenswertes.
    */
   async istUnversehrt(monat: string, datei: BelegDatei): Promise<boolean> {
-    if (!/\.pdf$/i.test(datei.dateiname) && !/\.pdf$/i.test(datei.id)) return true;
-
     let griff;
     try {
       griff = await open(await this.pfadFuer(monat, datei.id), 'r');
-      const puffer = Buffer.alloc(5);
-      const { bytesRead } = await griff.read(puffer, 0, 5, 0);
-      return bytesRead === 5 && puffer.toString('latin1') === '%PDF-';
+      const puffer = Buffer.alloc(12);
+      const { bytesRead } = await griff.read(puffer, 0, 12, 0);
+      if (bytesRead < 4) return false;
+
+      // Irgendein bekanntes Dateiformat genuegt. Die Endung taugt als Massstab
+      // nicht: ein Beleg, den sevDesk als Bild liefert, bekommt trotzdem den
+      // Namen "beleg-123.pdf" - er waere dauerhaft als kaputt gegolten und bei
+      // jedem Laden erneut geholt worden.
+      return erkenneSignatur(puffer.subarray(0, bytesRead)) !== undefined;
     } catch {
       return false;
     } finally {
