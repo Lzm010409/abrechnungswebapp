@@ -3,6 +3,7 @@ import type {
   AblageErgebnis,
   Ablageordner,
   BelegDatei,
+  LadeFortschritt,
   Monat,
   Position,
 } from '@abrechnung/shared';
@@ -85,8 +86,23 @@ export class OneDriveAblage {
    * Teilt die Belege des Monats ein und legt sie ab.
    *
    * `nurVorschau` fuehrt die Einteilung durch, ohne etwas zu schreiben.
+   *
+   * `melde` gibt den Stand nach aussen. Ein voller Monat sind schnell fuenfzig
+   * Dateien, die einzeln und gedrosselt hinausgehen - ohne Rueckmeldung sieht
+   * die Oberflaeche minutenlang aus, als sei nichts passiert.
    */
-  async lege(monat: Monat, nurVorschau = false): Promise<AblageErgebnis> {
+  async lege(
+    monat: Monat,
+    nurVorschau = false,
+    melde: (f: LadeFortschritt) => void = () => undefined,
+  ): Promise<AblageErgebnis> {
+    melde({
+      phase: 'dateien',
+      schritt: 'einteilung',
+      titel: 'Belege werden eingeteilt',
+      text: 'Konto, Bar und Tanken',
+    });
+
     const einteilung = await this.teileEin(monat);
     // Nur die Ausgaben zaehlen: von den Eingaengen sollte hier ohnehin nichts
     // landen, sie als "ohne Beleg" zu melden waere irrefuehrend.
@@ -96,6 +112,15 @@ export class OneDriveAblage {
         istAusgabe(p) &&
         !p.dateien.some(istAusgabenbeleg),
     ).length;
+
+    melde({
+      phase: 'dateien',
+      schritt: 'einteilung',
+      titel: 'Belege werden eingeteilt',
+      text: `${einteilung.length} Beleg(e) eingeteilt`,
+      erledigt: 1,
+      gesamt: 1,
+    });
 
     if (nurVorschau || !this.einsatzbereit) {
       return {
@@ -109,20 +134,57 @@ export class OneDriveAblage {
       };
     }
 
+    melde({
+      phase: 'dateien',
+      schritt: 'ordner',
+      titel: 'Monatsordner wird gesucht',
+      text: `Ausgabenordner zu ${monat.monat} in OneDrive`,
+    });
+
     const [jahr, mon] = monat.monat.split('-') as [string, string];
-    const ordnerId = await this.ermittleOrdner(jahr, mon);
-    if (!ordnerId) {
+    const gefunden = await this.ermittleOrdner(jahr, mon);
+    if (!gefunden.ordnerId) {
+      melde({
+        phase: 'dateien',
+        schritt: 'ordner',
+        titel: 'Monatsordner wird gesucht',
+        text: 'nicht gefunden',
+        erledigt: 1,
+        gesamt: 1,
+      });
       return {
         monat: monat.monat,
         ausgefuehrt: false,
         eintraege: einteilung,
         ohneBeleg,
-        hinweis: `Zu ${monat.monat} wurde in OneDrive kein Ausgabenordner gefunden.`,
+        hinweis:
+          `Zu ${monat.monat} wurde in OneDrive kein Ausgabenordner gefunden. ` +
+          `Der Workflow bekam [{ jahr: "${jahr}", monat: "${mon}" }] und antwortete ` +
+          `mit: ${gefunden.antwort}`,
       };
     }
 
+    const ordnerId = gefunden.ordnerId;
+    melde({
+      phase: 'dateien',
+      schritt: 'ordner',
+      titel: 'Monatsordner wird gesucht',
+      text: 'gefunden',
+      erledigt: 1,
+      gesamt: 1,
+    });
+
     const erledigt: AblageEintrag[] = [];
     for (const [i, eintrag] of einteilung.entries()) {
+      melde({
+        phase: 'dateien',
+        schritt: 'ablegen',
+        titel: 'Belege werden abgelegt',
+        text: `${eintrag.dateiname} → ${eintrag.ordner}`,
+        erledigt: i,
+        gesamt: einteilung.length,
+      });
+
       // Vor jeder Datei ausser der ersten kurz Luft holen.
       if (i > 0 && this.pauseMs > 0) await this.schlaf(this.pauseMs);
 
@@ -139,6 +201,16 @@ export class OneDriveAblage {
         erledigt.push({ ...eintrag, fehler: meldung });
       }
     }
+
+    const geschafft = erledigt.filter((e) => !e.fehler).length;
+    melde({
+      phase: 'dateien',
+      schritt: 'ablegen',
+      titel: 'Belege werden abgelegt',
+      text: `${geschafft} von ${einteilung.length} abgelegt`,
+      erledigt: einteilung.length,
+      gesamt: einteilung.length,
+    });
 
     this.deps.log?.info(
       { monat: monat.monat, anzahl: erledigt.filter((e) => !e.fehler).length },
@@ -220,12 +292,23 @@ export class OneDriveAblage {
 
   // -------------------------------------------------------------------------
 
-  private async ermittleOrdner(jahr: string, monat: string): Promise<string | undefined> {
+  /**
+   * Fragt den Workflow nach der Ordner-ID des Monats.
+   *
+   * Zurueck kommt auch die Antwort selbst, gekuerzt. Ohne sie stand in der
+   * Oberflaeche nur "kein Ausgabenordner gefunden" - und niemand konnte
+   * unterscheiden, ob der Workflow nichts gefunden hat, ob er gar nicht
+   * aktiviert ist oder ob die Antwort nur anders aussieht als erwartet.
+   */
+  private async ermittleOrdner(
+    jahr: string,
+    monat: string,
+  ): Promise<{ ordnerId?: string; antwort: string }> {
     // Der Workflow "Find Ausgabenordner" erwartet eine Liste mit einem Eintrag,
     // das Jahr vierstellig und den Monat zweistellig: [{ jahr: "2026", monat: "07" }].
     const antwort = await this.rufe(this.opts.ordnerUrl!, [{ jahr, monat }]);
 
-    return sucheOrdnerId(antwort);
+    return { ordnerId: sucheOrdnerId(antwort), antwort: kuerze(antwort) };
   }
 
   private async legeDateiAb(
@@ -304,6 +387,13 @@ export class OneDriveAblage {
     await this.schlaf(ms);
     return true;
   }
+}
+
+/** Antwort fuer die Fehlermeldung - kurz genug fuer eine Zeile Oberflaeche. */
+function kuerze(wert: unknown): string {
+  const text = typeof wert === 'string' ? wert : JSON.stringify(wert);
+  if (!text || text === '""') return '(leer)';
+  return text.length > 180 ? `${text.slice(0, 180)}…` : text;
 }
 
 /** `Retry-After` kommt als Sekundenzahl oder als Datum. */

@@ -318,10 +318,19 @@ export function App() {
               onSchliessen={() => setAblage(undefined)}
               onAusfuehren={
                 faehigkeiten?.onedriveAblage
-                  ? () =>
-                      mitLadeanzeige(async () => {
-                        setAblage(await api.ablage(monat, true));
-                      })
+                  ? () => {
+                      // Das Ergebnis des vorigen Versuchs wegraeumen: sonst
+                      // stuende dessen Hinweis noch minutenlang da, waehrend
+                      // der neue Lauf schon unterwegs ist.
+                      setAblage(undefined);
+                      return mitVorgang(
+                        'Belege werden abgelegt',
+                        'Jede Datei geht einzeln nach OneDrive, mit einer kurzen ' +
+                          'Pause dazwischen — das schont den n8n-Server.',
+                        (melde) => api.ablageMitFortschritt(monat, true, melde),
+                        setAblage,
+                      );
+                    }
                   : undefined
               }
             />
@@ -462,16 +471,10 @@ export function App() {
                   erledigt: 1,
                   gesamt: 1,
                 });
-                melde({
-                  phase: 'dateien',
-                  schritt: 'einteilung',
-                  titel: 'Belege werden eingeteilt',
-                  text: 'Konto, Bar und Tanken',
-                });
-
                 // Die Einteilung steht erst jetzt fest - sie haengt daran, welche
-                // Buchung sich auf einer Kontoauszugsseite wiederfindet.
-                return api.ablage(monat);
+                // Buchung sich auf einer Kontoauszugsseite wiederfindet. Sie
+                // meldet ihren Stand selbst.
+                return api.ablageMitFortschritt(monat, false, melde);
               },
               setAblage,
             )

@@ -456,7 +456,14 @@ code { background: #f1f3f5; padding: 1px 4px; border-radius: 3px; font-size: 12p
 .ablage ul { list-style: none; margin: 6px 0 0; padding: 0; }
 .ablage li { font-size: 12px; padding: 2px 0; word-break: break-all; }
 .ablage li.fehler { color: var(--fehler); }
-.ablage .hinweis { font-size: 12px; color: var(--warn); margin: 4px 0; }
+/* Der Hinweis traegt bei einem Fehlschlag die Antwort des Workflows mit -
+   die kann lang sein und darf die Spalte nicht sprengen. */
+.ablage .hinweis {
+  font-size: 12px;
+  color: var(--warn);
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+}
 
 /* -- Markierungen (Privatentnahme, Dauerbeleg) ------------------------- */
 

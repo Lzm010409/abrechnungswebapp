@@ -408,18 +408,41 @@ export async function registriereRouten(
    * Ohne `?ausfuehren=true` entsteht nur eine Vorschau. Dateien in fremde
    * Ordner zu schieben ist nichts, was nebenbei passieren sollte.
    */
+  const legeAb = async (
+    monat: string,
+    ausfuehren: boolean,
+    melde: (f: LadeFortschritt) => void,
+  ) => {
+    const daten = await ctx.monate.lade(monat);
+
+    const ablage = new OneDriveAblage(ctx.ablageOptionen ?? {}, {
+      ladeDatei: (dateiId) => ctx.ablage.lese(monat, dateiId),
+      log: app.log,
+    });
+
+    return ablage.lege(daten, !ausfuehren, melde);
+  };
+
   app.post<{ Params: { monat: string }; Querystring: { ausfuehren?: string } }>(
     '/api/months/:monat/ablage',
-    async (req) => {
+    async (req) =>
+      legeAb(pruefeMonat(req.params.monat), req.query.ausfuehren === 'true', () => undefined),
+  );
+
+  /**
+   * Dasselbe mit laufender Rueckmeldung, welche Datei gerade drankommt.
+   *
+   * Ein voller Monat sind schnell fuenfzig Dateien, die einzeln und gedrosselt
+   * hinausgehen. Ohne Strom stuende die Oberflaeche minutenlang still und
+   * zeigte dabei weiter das Ergebnis des vorigen Versuchs.
+   */
+  app.post<{ Params: { monat: string }; Querystring: { ausfuehren?: string } }>(
+    '/api/months/:monat/ablage/stream',
+    async (req, reply) => {
       const monat = pruefeMonat(req.params.monat);
-      const daten = await ctx.monate.lade(monat);
+      const ausfuehren = req.query.ausfuehren === 'true';
 
-      const ablage = new OneDriveAblage(ctx.ablageOptionen ?? {}, {
-        ladeDatei: (dateiId) => ctx.ablage.lese(monat, dateiId),
-        log: app.log,
-      });
-
-      return ablage.lege(daten, req.query.ausfuehren !== 'true');
+      return alsStrom(req, reply, (melde) => legeAb(monat, ausfuehren, melde));
     },
   );
 

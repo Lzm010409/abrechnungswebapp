@@ -508,6 +508,55 @@ describe('End-to-End: gesamte Programmkette', () => {
 
   // -------------------------------------------------------------------------
 
+  describe('Belegablage mit Fortschritt', () => {
+    beforeEach(async () => {
+      sevdesk = await starteMockSevDesk(basisDaten());
+      await starteApp();
+    });
+
+    it('meldet die Einteilung als Vorgang, nicht als stilles Warten', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/months/${MONAT}/ablage/stream`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toContain('text/event-stream');
+
+      const ereignisse = leseVorgang(res.payload);
+      const schritte = ereignisse
+        .filter((e) => e.art === 'fortschritt')
+        .map((e) => (e.art === 'fortschritt' ? e.fortschritt.schritt : undefined));
+
+      expect(schritte).toContain('einteilung');
+      expect(ereignisse.at(-1)!.art).toBe('fertig');
+    });
+
+    it('bleibt ohne konfigurierte Webhooks bei der Vorschau', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+
+      const ereignisse = leseVorgang(
+        (
+          await app.inject({
+            method: 'POST',
+            url: `/api/months/${MONAT}/ablage/stream?ausfuehren=true`,
+          })
+        ).payload,
+      );
+
+      const letztes = ereignisse.at(-1)!;
+      expect(letztes.art).toBe('fertig');
+      const ergebnis = (letztes as { ergebnis: { ausgefuehrt: boolean; hinweis?: string } })
+        .ergebnis;
+      expect(ergebnis.ausgefuehrt).toBe(false);
+      expect(ergebnis.hinweis).toContain('N8N_ORDNER_URL');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
   describe('Ablageordner an der Buchung', () => {
     const finde = (monat: Monat, id: string) => monat.positionen.find((p) => p.id === id)!;
 

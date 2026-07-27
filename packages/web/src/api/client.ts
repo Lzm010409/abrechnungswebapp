@@ -242,6 +242,22 @@ export const api = {
       { method: 'POST' },
     ),
 
+  /**
+   * Dasselbe mit Fortschritt: welcher Beleg gerade nach OneDrive geht.
+   *
+   * Bei fuenfzig Belegen dauert der Lauf Minuten - ohne Rueckmeldung sieht die
+   * Oberflaeche so lange aus, als sei sie stehengeblieben.
+   */
+  ablageMitFortschritt: (
+    monat: string,
+    ausfuehren: boolean,
+    aufFortschritt: (f: LadeFortschritt) => void,
+  ) =>
+    fuehreVorgangAus<AblageErgebnis>(
+      `/api/months/${monat}/ablage/stream${ausfuehren ? '?ausfuehren=true' : ''}`,
+      aufFortschritt,
+    ),
+
   ki: {
     /** Liest die Belege aus und meldet dabei, welcher gerade drankommt. */
     extrahiere: (monat: string, aufFortschritt: (f: LadeFortschritt) => void) =>

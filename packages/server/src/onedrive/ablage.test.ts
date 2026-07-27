@@ -1,6 +1,6 @@
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Monat, Position } from '@abrechnung/shared';
+import type { LadeFortschritt, Monat, Position } from '@abrechnung/shared';
 import { OneDriveAblage, sucheOrdnerId, type AblageOptionen } from './ablage.js';
 
 /**
@@ -373,6 +373,49 @@ describe('Ablegen ueber n8n', () => {
 
     expect(ergebnis.ausgefuehrt).toBe(false);
     expect(ergebnis.hinweis).toContain('kein Ausgabenordner');
+    // Ohne die Antwort des Workflows laesst sich nicht unterscheiden, ob er
+    // nichts gefunden hat oder ob er gar nicht erst antwortet.
+    expect(ergebnis.hinweis).toContain('jahr: "2026"');
+    expect(ergebnis.hinweis).toContain('{"objects":[]}');
+  });
+
+  it('meldet, welche Datei gerade drankommt', async () => {
+    const fetchImpl = vi.fn(async (url: string) =>
+      antwort(String(url).endsWith('/ordner') ? { ordnerId: 'X' } : { ok: true }),
+    );
+
+    const staende: LadeFortschritt[] = [];
+    await bereit(fetchImpl as unknown as typeof fetch, { pauseMs: 0 }).lege(
+      monat({ positionen: [pos({ id: 'a' }), pos({ id: 'b' })] }),
+      false,
+      (f) => staende.push(f),
+    );
+
+    const schritte = staende.map((s) => s.schritt);
+    expect(schritte).toContain('einteilung');
+    expect(schritte).toContain('ordner');
+    expect(schritte).toContain('ablegen');
+
+    // Der letzte Stand sagt, was tatsaechlich durchging.
+    const letzter = staende.at(-1)!;
+    expect(letzter.schritt).toBe('ablegen');
+    expect(letzter.erledigt).toBe(2);
+    expect(letzter.gesamt).toBe(2);
+    expect(letzter.text).toContain('2 von 2');
+  });
+
+  it('meldet auch, wenn der Monatsordner fehlt - der Lauf endet dort', async () => {
+    const fetchImpl = vi.fn(async () => antwort({ objects: [] }));
+
+    const staende: LadeFortschritt[] = [];
+    await bereit(fetchImpl as unknown as typeof fetch).lege(
+      monat({ positionen: [pos({ id: 'a' })] }),
+      false,
+      (f) => staende.push(f),
+    );
+
+    expect(staende.at(-1)).toMatchObject({ schritt: 'ordner', text: 'nicht gefunden' });
+    expect(staende.map((s) => s.schritt)).not.toContain('ablegen');
   });
 });
 

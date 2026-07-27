@@ -584,9 +584,24 @@ der Einteilung; erst ein Klick legt die Dateien ab. Ohne die beiden Webhooks
 bleibt es bei der Vorschau — die ist auch ohne OneDrive nützlich.
 
 ```
-POST /api/months/2026-06/ablage                 → Vorschau
-POST /api/months/2026-06/ablage?ausfuehren=true → legt ab
+POST /api/months/2026-06/ablage                        → Vorschau
+POST /api/months/2026-06/ablage?ausfuehren=true        → legt ab
+POST /api/months/2026-06/ablage/stream[?ausfuehren=…]  → dasselbe mit Fortschritt (SSE)
 ```
+
+**Der Lauf ist sichtbar.** Fünfzig Belege einzeln und gedrosselt hochzuladen
+dauert Minuten; ohne Rückmeldung sähe die Oberfläche so lange aus, als sei sie
+stehengeblieben. Der Klick auf *Belege jetzt ablegen* öffnet deshalb dasselbe
+Overlay wie die KI-Läufe und zeigt drei Schritte: **Belege werden eingeteilt**,
+**Monatsordner wird gesucht**, **Belege werden abgelegt** (mit Zähler und
+aktuellem Dateinamen). Das Ergebnis des vorigen Versuchs wird beim Start
+weggeräumt — sonst stünde dessen Hinweis noch da, während der neue Lauf schon
+unterwegs ist.
+
+Findet der Workflow keinen Monatsordner, nennt die Meldung, **womit er gefragt
+wurde und was er geantwortet hat**. Nur „kein Ausgabenordner gefunden" ließ
+offen, ob der Workflow nichts fand, gar nicht aktiviert ist oder bloß anders
+antwortet als erwartet.
 
 Geschrieben wird über zwei n8n-Workflows: **Find Ausgabenordner für Jahr und
 Monat** (`FfLNDgPrXdV6lJe3`) liefert zu `[{ jahr, monat }]` die Ordner-ID,
