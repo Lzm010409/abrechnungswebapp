@@ -6,6 +6,7 @@ import type {
   Markierung,
   Monat,
   MonatsReview,
+  Vorgang,
 } from '@abrechnung/shared';
 import {
   aktuellerMonat,
@@ -23,6 +24,7 @@ import { Ladefortschritt } from './components/Ladefortschritt';
 import { PositionenTabelle } from './components/PositionenTabelle';
 import { Sammelaktionen } from './components/Sammelaktionen';
 import { Vorgangsanzeige } from './components/Vorgangsanzeige';
+import { Vorgangsleiste } from './components/Vorgangsleiste';
 
 export function App() {
   const [monat, setMonat] = useState(() => verschiebeMonat(aktuellerMonat(), -1));
@@ -45,6 +47,17 @@ export function App() {
   const [fehler, setFehler] = useState<string>();
   /** Bricht einen noch laufenden Lade-Stream ab, wenn der Monat wechselt. */
   const abbruch = useRef<AbortController | null>(null);
+
+  /** Was gerade im Hintergrund laeuft bzw. fertig wurde. */
+  const [vorgaenge, setVorgaenge] = useState<Vorgang[]>([]);
+  /**
+   * Vorgaenge, deren Ergebnis schon uebernommen wurde.
+   *
+   * Die Abfrage laeuft weiter, solange etwas arbeitet - ohne diese Merkliste
+   * wuerde dasselbe Ergebnis bei jeder Runde erneut angewandt und die Meldung
+   * bliebe ewig stehen.
+   */
+  const verarbeitet = useRef(new Set<string>());
 
   useEffect(() => {
     api.capabilities().then(setFaehigkeiten).catch((err) => setFehler(String(err)));
@@ -117,6 +130,107 @@ export function App() {
     void laden();
     return () => abbruch.current?.abort();
   }, [laden]);
+
+  /**
+   * Uebernimmt das Ergebnis eines fertigen Vorgangs.
+   *
+   * Genau hier wird der Nutzer informiert - vorher nicht. Der Vorgang wird
+   * danach serverseitig vergessen, damit er beim naechsten Laden der Seite
+   * nicht erneut auftaucht.
+   */
+  const uebernimm = useCallback((vorgang: Vorgang) => {
+    if (verarbeitet.current.has(vorgang.id)) return;
+    verarbeitet.current.add(vorgang.id);
+
+    if (vorgang.status === 'fehler') {
+      setFehler(`${vorgang.titel}: ${vorgang.fehler}`);
+    } else {
+      switch (vorgang.art) {
+        case 'ki-belege': {
+          const e = vorgang.ergebnis as { neuAnalysiert: number; monat: Monat };
+          setDaten(e.monat);
+          setMeldung(
+            e.neuAnalysiert === 0
+              ? 'Alle Belege waren bereits ausgelesen.'
+              : `${e.neuAnalysiert} Beleg(e) neu ausgelesen.`,
+          );
+          break;
+        }
+        case 'ki-pruefung': {
+          const review = vorgang.ergebnis as MonatsReview;
+          setReview(review);
+          setMeldung(
+            `Monatsprüfung fertig: ${review.auffaelligkeiten.length} Auffälligkeit(en).`,
+          );
+          break;
+        }
+        case 'ablage-vorschau':
+        case 'ablage': {
+          const ergebnis = vorgang.ergebnis as AblageErgebnis;
+          setAblage(ergebnis);
+          if (vorgang.art === 'ablage') {
+            const fehlgeschlagen = ergebnis.eintraege.filter((e) => e.fehler).length;
+            setMeldung(
+              ergebnis.ausgefuehrt
+                ? `Belegablage fertig: ${ergebnis.eintraege.length - fehlgeschlagen} von ` +
+                  `${ergebnis.eintraege.length} abgelegt.`
+                : 'Belegablage konnte nicht ausgeführt werden – siehe Hinweis unten.',
+            );
+          }
+          break;
+        }
+      }
+    }
+
+    void api.vergissVorgang(vorgang.id).catch(() => undefined);
+  }, []);
+
+  /**
+   * Fragt den Stand der Hintergrundvorgaenge ab.
+   *
+   * Bewusst kurze Einzelaufrufe statt einer offenen Verbindung: eine Anfrage,
+   * die minutenlang nichts liefert, kappt der Reverse-Proxy mit einem 524 -
+   * genau daran ist die Monatspruefung frueher gescheitert.
+   */
+  useEffect(() => {
+    let aktiv = true;
+
+    const abfragen = async () => {
+      if (!aktiv) return;
+      try {
+        const liste = await api.vorgaenge(monat);
+        if (!aktiv) return;
+
+        setVorgaenge(liste.filter((v) => v.status === 'laeuft'));
+        for (const v of liste) if (v.status !== 'laeuft') uebernimm(v);
+      } catch {
+        // Netzaussetzer sind kein Grund, die Abfrage einzustellen - beim
+        // naechsten Durchgang klappt es womoeglich wieder.
+      }
+    };
+
+    void abfragen();
+    const takt = setInterval(() => void abfragen(), 1500);
+    return () => {
+      aktiv = false;
+      clearInterval(takt);
+    };
+  }, [monat, uebernimm]);
+
+  /** Startet einen Hintergrundvorgang und zeigt ihn sofort in der Leiste. */
+  const starte = async (starter: () => Promise<Vorgang>) => {
+    setFehler(undefined);
+    setMeldung(undefined);
+    try {
+      const vorgang = await starter();
+      setVorgaenge((alt) => [...alt, vorgang]);
+    } catch (err) {
+      setFehler(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  /** true, solange ein Vorgang dieser Art fuer den Monat laeuft. */
+  const laeuft = (art: Vorgang['art']) => vorgaenge.some((v) => v.art === art);
 
   /**
    * Fuehrt einen laenger laufenden Vorgang aus und zeigt dabei, woran gerade
@@ -279,6 +393,8 @@ export function App() {
         />
       )}
 
+      <Vorgangsleiste vorgaenge={vorgaenge} />
+
       {vorgang && (
         <Vorgangsanzeige
           titel={vorgang.titel}
@@ -314,7 +430,7 @@ export function App() {
           {ablage && (
             <Ablagevorschau
               ergebnis={ablage}
-              laedt={laedt}
+              laedt={laedt || laeuft('ablage')}
               onSchliessen={() => setAblage(undefined)}
               onAusfuehren={
                 faehigkeiten?.onedriveAblage
@@ -323,13 +439,7 @@ export function App() {
                       // stuende dessen Hinweis noch minutenlang da, waehrend
                       // der neue Lauf schon unterwegs ist.
                       setAblage(undefined);
-                      return mitVorgang(
-                        'Belege werden abgelegt',
-                        'Jede Datei geht einzeln nach OneDrive, mit einer kurzen ' +
-                          'Pause dazwischen — das schont den n8n-Server.',
-                        (melde) => api.ablageMitFortschritt(monat, true, melde),
-                        setAblage,
-                      );
+                      void starte(() => api.starteAblage(monat, true));
                     }
                   : undefined
               }
@@ -392,41 +502,18 @@ export function App() {
           <>
             <button
               className="ki"
-              disabled={laedt || Boolean(vorgang) || !daten}
-              onClick={() =>
-                mitVorgang(
-                  'Belege werden ausgelesen',
-                  'Jeder Beleg geht einmal an das Modell. Schon gelesene Belege ' +
-                    'sind zwischengespeichert und kosten nichts.',
-                  (melde) => api.ki.extrahiere(monat, melde),
-                  ({ neuAnalysiert, monat: neu }) => {
-                    setDaten(neu);
-                    setMeldung(
-                      neuAnalysiert === 0
-                        ? 'Alle Belege waren bereits ausgelesen.'
-                        : `${neuAnalysiert} Beleg(e) neu ausgelesen.`,
-                    );
-                  },
-                )
-              }
+              disabled={laedt || Boolean(vorgang) || laeuft('ki-belege') || !daten}
+              onClick={() => void starte(() => api.ki.extrahiere(monat))}
             >
-              Belege auslesen
+              {laeuft('ki-belege') ? 'Belege werden ausgelesen …' : 'Belege auslesen'}
             </button>
 
             <button
               className="ki"
-              disabled={laedt || Boolean(vorgang) || !daten}
-              onClick={() =>
-                mitVorgang(
-                  'Der Monat wird geprüft',
-                  'Ein einzelner Durchgang über alle Buchungen – das dauert ' +
-                    'meist unter einer Minute.',
-                  (melde) => api.ki.pruefe(monat, melde),
-                  setReview,
-                )
-              }
+              disabled={laedt || Boolean(vorgang) || laeuft('ki-pruefung') || !daten}
+              onClick={() => void starte(() => api.ki.pruefe(monat))}
             >
-              Monat prüfen
+              {laeuft('ki-pruefung') ? 'Monat wird geprüft …' : 'Monat prüfen'}
             </button>
           </>
         )}
@@ -473,10 +560,13 @@ export function App() {
                 });
                 // Die Einteilung steht erst jetzt fest - sie haengt daran, welche
                 // Buchung sich auf einer Kontoauszugsseite wiederfindet. Sie
-                // meldet ihren Stand selbst.
-                return api.ablageMitFortschritt(monat, false, melde);
+                // laeuft als eigener Hintergrundvorgang weiter; die Vorschau
+                // erscheint, sobald er durch ist. Das PDF ist zu diesem
+                // Zeitpunkt schon heruntergeladen.
+                const einteilung = await api.starteAblage(monat, false);
+                setVorgaenge((alt) => [...alt, einteilung]);
               },
-              setAblage,
+              () => undefined,
             )
           }
         >

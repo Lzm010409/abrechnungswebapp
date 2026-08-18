@@ -18,6 +18,7 @@ import type { CheckAccount } from '../sevdesk/types.js';
 import { EingabeFehler, NichtGefunden } from '../fehler.js';
 import { OneDriveAblage, type AblageOptionen } from '../onedrive/ablage.js';
 import type { Dateiablage } from '../storage/dateien.js';
+import type { Vorgaenge } from '../vorgaenge.js';
 
 export interface RoutenKontext {
   monate: MonatsDienst;
@@ -30,6 +31,8 @@ export interface RoutenKontext {
   authDeaktiviert: boolean;
   /** Webhooks fuer die Ablage in OneDrive - ohne sie gibt es nur Vorschau. */
   ablageOptionen?: AblageOptionen;
+  /** Laenger laufende Vorgaenge, die der Server im Hintergrund zu Ende fuehrt. */
+  vorgaenge: Vorgaenge;
 }
 
 /** Wirft einen 400er, wenn der Monatsparameter nicht YYYY-MM ist. */
@@ -70,48 +73,6 @@ function brauchtKi(ctx: RoutenKontext): KiDienst {
   return ctx.ki;
 }
 
-/**
- * Fuehrt einen laenger laufenden Vorgang aus und meldet den Fortschritt als
- * Server-Sent Events.
- *
- * Dieselbe Form wie beim Monatsladen: die Oberflaeche soll waehrenddessen
- * zeigen koennen, woran gearbeitet wird, statt nur einen Knopf auszugrauen.
- */
-async function alsStrom(
-  req: FastifyRequest,
-  reply: FastifyReply,
-  arbeit: (melde: (f: LadeFortschritt) => void) => Promise<unknown>,
-): Promise<void> {
-  reply.hijack();
-  reply.raw.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
-
-  let offen = true;
-  req.raw.on('close', () => {
-    offen = false;
-  });
-
-  const sende = (ereignis: VorgangsEreignis): void => {
-    if (!offen) return;
-    reply.raw.write(`data: ${JSON.stringify(ereignis)}\n\n`);
-  };
-
-  try {
-    const ergebnis = await arbeit((fortschritt) => sende({ art: 'fortschritt', fortschritt }));
-    sende({ art: 'fertig', ergebnis });
-  } catch (err) {
-    const meldung = err instanceof Error ? err.message : String(err);
-    req.log.error({ err: meldung }, 'Vorgang fehlgeschlagen');
-    sende({ art: 'fehler', fehler: meldung });
-  } finally {
-    if (offen) reply.raw.end();
-  }
-}
-
 export async function registriereRouten(
   app: FastifyInstance,
   ctx: RoutenKontext,
@@ -134,6 +95,44 @@ export async function registriereRouten(
   }));
 
   app.get('/api/health', async () => ({ status: 'ok', zeit: new Date().toISOString() }));
+
+  // -------------------------------------------------------------------------
+  // Hintergrundvorgaenge
+  //
+  // Gestartet wird ueber die jeweilige .../job-Route, abgefragt hier. Jeder
+  // Aufruf antwortet sofort - es wird nie eine Verbindung offen gehalten,
+  // waehrend das Modell arbeitet.
+  // -------------------------------------------------------------------------
+
+  app.get<{ Querystring: { monat?: string } }>('/api/vorgaenge', async (req) => {
+    const monat = req.query.monat ? pruefeMonat(req.query.monat) : undefined;
+    return ctx.vorgaenge.alle(monat);
+  });
+
+  app.get<{ Params: { id: string } }>('/api/vorgaenge/:id', async (req) => {
+    const vorgang = ctx.vorgaenge.hole(req.params.id);
+    if (!vorgang) {
+      throw new NichtGefunden(
+        `Vorgang ${req.params.id} ist nicht bekannt. Moeglicherweise wurde er nach ` +
+          'einem Neustart des Servers verworfen.',
+      );
+    }
+    return vorgang;
+  });
+
+  /** Nimmt einen abgeschlossenen Vorgang aus der Liste - die UI hat ihn gesehen. */
+  app.delete<{ Params: { id: string } }>('/api/vorgaenge/:id', async (req, reply) => {
+    const vorgang = ctx.vorgaenge.hole(req.params.id);
+    if (!vorgang) throw new NichtGefunden(`Vorgang ${req.params.id} ist nicht bekannt.`);
+
+    if (!ctx.vorgaenge.entferne(req.params.id)) {
+      throw new EingabeFehler(
+        'Der Vorgang laeuft noch. Ihn jetzt zu entfernen wuerde ihn nicht anhalten, ' +
+          'nur unsichtbar machen.',
+      );
+    }
+    return reply.code(204).send();
+  });
 
   // -------------------------------------------------------------------------
   // Monat
@@ -186,6 +185,19 @@ export async function registriereRouten(
         reply.raw.write(`data: ${JSON.stringify(ereignis)}\n\n`);
       };
 
+      /*
+       * Lebenszeichen alle 15 Sekunden.
+       *
+       * Cloudflare kappt eine Verbindung, ueber die 100 Sekunden lang nichts
+       * fliesst, mit einem 524 - und der Browser sieht einen Abbruch, obwohl
+       * der Server weiterarbeitet. Ein Kommentar (Zeile mit ":") gilt in SSE
+       * als Nutzlast, wird vom Client aber ignoriert.
+       */
+      const puls = setInterval(() => {
+        if (offen) reply.raw.write(': puls\n\n');
+      }, 15_000);
+      puls.unref?.();
+
       sende({ art: 'fortschritt', fortschritt: { phase: 'start', text: 'Verbunden' } });
 
       try {
@@ -199,6 +211,7 @@ export async function registriereRouten(
         req.log.error({ err: meldung, monat }, 'Lade-Stream fehlgeschlagen');
         sende({ art: 'fehler', fehler: meldung });
       } finally {
+        clearInterval(puls);
         if (offen) reply.raw.end();
       }
     },
@@ -430,19 +443,28 @@ export async function registriereRouten(
   );
 
   /**
-   * Dasselbe mit laufender Rueckmeldung, welche Datei gerade drankommt.
+   * Dasselbe als Hintergrundvorgang, mit laufender Rueckmeldung.
    *
    * Ein voller Monat sind schnell fuenfzig Dateien, die einzeln und gedrosselt
-   * hinausgehen. Ohne Strom stuende die Oberflaeche minutenlang still und
-   * zeigte dabei weiter das Ergebnis des vorigen Versuchs.
+   * hinausgehen. Der Aufruf kehrt sofort mit einer Kennung zurueck; gearbeitet
+   * wird weiter, auch wenn niemand mehr zusieht.
    */
   app.post<{ Params: { monat: string }; Querystring: { ausfuehren?: string } }>(
-    '/api/months/:monat/ablage/stream',
+    '/api/months/:monat/ablage/job',
     async (req, reply) => {
       const monat = pruefeMonat(req.params.monat);
       const ausfuehren = req.query.ausfuehren === 'true';
 
-      return alsStrom(req, reply, (melde) => legeAb(monat, ausfuehren, melde));
+      const vorgang = ctx.vorgaenge.starte(
+        {
+          art: ausfuehren ? 'ablage' : 'ablage-vorschau',
+          monat,
+          titel: ausfuehren ? 'Belege werden abgelegt' : 'Belege werden eingeteilt',
+        },
+        (melde) => legeAb(monat, ausfuehren, melde),
+      );
+
+      return reply.code(202).send(vorgang);
     },
   );
 
@@ -541,12 +563,21 @@ export async function registriereRouten(
     async (req) => leseBelegeAus(pruefeMonat(req.params.monat), () => undefined),
   );
 
-  /** Dasselbe mit laufender Rueckmeldung, welcher Beleg gerade drankommt. */
+  /** Dasselbe als Hintergrundvorgang, mit Rueckmeldung je Beleg. */
   app.post<{ Params: { monat: string } }>(
-    '/api/months/:monat/ai/extract/stream',
+    '/api/months/:monat/ai/extract/job',
     async (req, reply) => {
       const monat = pruefeMonat(req.params.monat);
-      return alsStrom(req, reply, (melde) => leseBelegeAus(monat, melde));
+      // Fehlt der Schluessel, soll das sofort auffallen und nicht erst als
+      // fehlgeschlagener Vorgang eine Sekunde spaeter.
+      brauchtKi(ctx);
+
+      const vorgang = ctx.vorgaenge.starte(
+        { art: 'ki-belege', monat, titel: 'Belege werden ausgelesen' },
+        (melde) => leseBelegeAus(monat, melde),
+      );
+
+      return reply.code(202).send(vorgang);
     },
   );
 
@@ -607,18 +638,23 @@ export async function registriereRouten(
   });
 
   /**
-   * Die Pruefung ist ein einzelner Modellaufruf - zaehlbaren Fortschritt gibt
-   * es nicht. Gemeldet wird trotzdem, damit die Oberflaeche sagen kann, worauf
-   * gerade gewartet wird.
+   * Die Pruefung als Hintergrundvorgang.
+   *
+   * Sie ist ein einzelner Modellaufruf und dauert bei einem vollen Monat
+   * Minuten - in denen nichts zu melden waere. Genau daran ist die fruehere
+   * Strom-Fassung gescheitert: der Reverse-Proxy kappte die Verbindung nach
+   * 100 Sekunden ohne Daten (Cloudflare 524), und der Nutzer sah einen Fehler,
+   * obwohl das Modell weiterarbeitete. Jetzt kehrt der Aufruf sofort zurueck.
    */
   app.post<{ Params: { monat: string } }>(
-    '/api/months/:monat/ai/review/stream',
+    '/api/months/:monat/ai/review/job',
     async (req, reply) => {
       const monat = pruefeMonat(req.params.monat);
+      const ki = brauchtKi(ctx);
 
-      return alsStrom(req, reply, async (melde) => {
-        const ki = brauchtKi(ctx);
-
+      const vorgang = ctx.vorgaenge.starte(
+        { art: 'ki-pruefung', monat, titel: 'Der Monat wird geprüft' },
+        async (melde) => {
         melde({
           phase: 'ki-pruefung',
           schritt: 'sammeln',
@@ -662,7 +698,10 @@ export async function registriereRouten(
 
         ctx.db.speichereReview(monat, review);
         return review;
-      });
+        },
+      );
+
+      return reply.code(202).send(vorgang);
     },
   );
 

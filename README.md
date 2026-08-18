@@ -315,7 +315,46 @@ während im Hintergrund noch die Belegdateien nachlaufen.
 Der Zwischenstand wird bewusst **nicht** in den Cache geschrieben; bricht der
 Abruf danach ab, wäre sonst ein Monat ohne Belege gespeichert. Kommt kein Strom
 zustande (puffernder Reverse-Proxy), fällt das Frontend automatisch auf
-`GET /api/months/:monat` zurück.
+`GET /api/months/:monat` zurück. Alle 15 Sekunden geht ein Lebenszeichen über
+die Verbindung (`: puls`), damit ein zwischengeschalteter Proxy sie nicht für
+tot hält.
+
+### Langläufer laufen im Hintergrund
+
+**Belege auslesen**, **Monat prüfen** und die **Belegablage** dauern Minuten.
+Sie in einer offenen HTTP-Anfrage abzuwarten hat zweierlei gekostet:
+
+- Cloudflare kappt eine Verbindung, über die 100 Sekunden lang nichts fließt,
+  mit **HTTP 524**. Bei der Monatsprüfung ist genau das der Normalfall — ein
+  einzelner Modellaufruf, dazwischen passiert nichts zu melden. Der Nutzer sah
+  einen Fehler, während das Modell weiterarbeitete und Geld kostete.
+- Wer das Fenster wechselte oder neu lud, verlor den Lauf mitsamt Ergebnis.
+
+Deshalb führt der Server diese Vorgänge selbst zu Ende. Der Start antwortet
+sofort mit `202`, die Oberfläche fragt den Stand in kurzen Einzelaufrufen ab —
+**es wird nie eine Verbindung offen gehalten, während gearbeitet wird.**
+
+```
+POST /api/months/2026-06/ai/extract/job    → 202 { "id": "…", "status": "laeuft" }
+POST /api/months/2026-06/ai/review/job     → 202
+POST /api/months/2026-06/ablage/job[?ausfuehren=true] → 202
+
+GET    /api/vorgaenge?monat=2026-06   → alle Vorgänge des Monats, neueste zuerst
+GET    /api/vorgaenge/:id             → Status, Fortschritt, Ergebnis
+DELETE /api/vorgaenge/:id             → abgeschlossenen Vorgang vergessen
+```
+
+In der Oberfläche erscheint eine **Leiste** unter der Kopfzeile — bewusst keine
+Sperrschicht: daneben lässt sich weiterarbeiten, der Monat wechseln, die Seite
+neu laden. Sie zeigt je Vorgang den zuletzt gemeldeten Schritt samt Zähler.
+**Erst wenn der Vorgang durch ist**, wird das Ergebnis übernommen und der
+Nutzer informiert — die Prüfbefunde erscheinen, die ausgelesenen Belege stehen
+in der Tabelle, die Ablagevorschau klappt auf.
+
+Abgeschlossene Vorgänge bleiben eine Stunde abrufbar, damit ein Ergebnis auch
+ankommt, wenn gerade niemand hinsieht. Ein Serverneustart verwirft sie: sie
+liegen im Arbeitsspeicher, nicht in der Datenbank. Das ist Absicht — ein Lauf,
+den niemand mehr zu Ende führt, soll nicht als „läuft" konserviert werden.
 
 | Ampel | Bedeutung |
 |---|---|
@@ -449,17 +488,22 @@ ein Vielfaches, ohne hier erkennbar besser zu sein. Wer es anders will, setzt
 `ANTHROPIC_MODEL`. Das Modell entscheidet ausschließlich
 Zweifelsfälle — Beträge, Verknüpfungen und Summen kommen aus sevDesk.
 
-Beide länger laufenden Funktionen melden ihren Fortschritt als Ereignisstrom,
-genau wie das Monatsladen — beim Auslesen mit Zähler („Beleg 7 von 26" samt
-Dateiname), bei der Prüfung mit Spinner und der Angabe, worauf gewartet wird:
+Beide länger laufenden Funktionen sind
+[Hintergrundvorgänge](#langläufer-laufen-im-hintergrund) — beim Auslesen mit
+Zähler („Beleg 7 von 26" samt Dateiname), bei der Prüfung mit der Angabe,
+worauf gewartet wird:
 
 ```
-POST /api/months/2026-06/ai/extract/stream
-POST /api/months/2026-06/ai/review/stream
+POST /api/months/2026-06/ai/extract/job   → 202, läuft weiter
+POST /api/months/2026-06/ai/review/job    → 202, läuft weiter
 ```
 
-Die Endpunkte ohne `/stream` gibt es weiterhin; sie liefern dasselbe in einer
-Antwort.
+Die Endpunkte ohne `/job` gibt es weiterhin; sie liefern dasselbe in einer
+Antwort — und laufen genau deshalb bei einem vollen Monat in den
+Proxy-Zeitablauf. Für die Oberfläche sind sie nicht gedacht.
+
+Das Token-Budget je Anfrage deckt **Denken und Antwort zusammen** ab; die
+Werte stehen in `packages/server/src/ai/client.ts` unter `BUDGET`.
 
 | Funktion | Wo | Was |
 |---|---|---|
@@ -591,19 +635,19 @@ der Einteilung; erst ein Klick legt die Dateien ab. Ohne die beiden Webhooks
 bleibt es bei der Vorschau — die ist auch ohne OneDrive nützlich.
 
 ```
-POST /api/months/2026-06/ablage                        → Vorschau
-POST /api/months/2026-06/ablage?ausfuehren=true        → legt ab
-POST /api/months/2026-06/ablage/stream[?ausfuehren=…]  → dasselbe mit Fortschritt (SSE)
+POST /api/months/2026-06/ablage                     → Vorschau (blockierend)
+POST /api/months/2026-06/ablage?ausfuehren=true     → legt ab (blockierend)
+POST /api/months/2026-06/ablage/job[?ausfuehren=…]  → als Hintergrundvorgang
 ```
 
-**Der Lauf ist sichtbar.** Fünfzig Belege einzeln und gedrosselt hochzuladen
-dauert Minuten; ohne Rückmeldung sähe die Oberfläche so lange aus, als sei sie
-stehengeblieben. Der Klick auf *Belege jetzt ablegen* öffnet deshalb dasselbe
-Overlay wie die KI-Läufe und zeigt drei Schritte: **Belege werden eingeteilt**,
-**Monatsordner wird gesucht**, **Belege werden abgelegt** (mit Zähler und
-aktuellem Dateinamen). Das Ergebnis des vorigen Versuchs wird beim Start
-weggeräumt — sonst stünde dessen Hinweis noch da, während der neue Lauf schon
-unterwegs ist.
+**Der Lauf ist sichtbar und blockiert nicht.** Fünfzig Belege einzeln und
+gedrosselt hochzuladen dauert Minuten. Der Klick auf *Belege jetzt ablegen*
+startet deshalb einen [Hintergrundvorgang](#langläufer-laufen-im-hintergrund);
+die Leiste zeigt drei Schritte: **Belege werden eingeteilt**, **Monatsordner
+wird gesucht**, **Belege werden abgelegt** (mit Zähler und aktuellem
+Dateinamen). Das Ergebnis des vorigen Versuchs wird beim Start weggeräumt —
+sonst stünde dessen Hinweis noch da, während der neue Lauf schon unterwegs
+ist.
 
 Findet der Workflow keinen Monatsordner, nennt die Meldung, **womit er gefragt
 wurde und was er geantwortet hat**. Nur „kein Ausgabenordner gefunden" ließ

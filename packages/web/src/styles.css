@@ -504,6 +504,39 @@ code { background: #f1f3f5; padding: 1px 4px; border-radius: 3px; font-size: 12p
    Ablage und kein Zustand der Buchung selbst. */
 .marke.ablageordner { background: #f0f0ee; color: #55534d; }
 
+/* -- Hintergrundvorgaenge ---------------------------------------------- */
+
+/* Bewusst eine Leiste und kein Overlay: die Langlaeufer laufen im Hintergrund
+   weiter, es soll daneben weitergearbeitet werden koennen. */
+.vorgangsleiste {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  background: #eef5fd;
+  border: 1px solid #cfe0f5;
+  border-radius: 8px;
+}
+
+.vorgangszeile {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.vorgangszeile strong { font-weight: 600; }
+
+/* Der lange Schritttext darf die Leiste nicht in die Breite ziehen. */
+.vorgangszeile .grau {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vorgangsleiste .hinweis-leiste { margin-left: 22px; }
+
 /* -- Laufender Vorgang (KI) -------------------------------------------- */
 
 .vorgang {

@@ -303,6 +303,43 @@ export type VorgangsEreignis =
   | { art: 'fertig'; ergebnis: unknown }
   | { art: 'fehler'; fehler: string };
 
+/**
+ * Ein Vorgang, der im Hintergrund weiterlaeuft.
+ *
+ * Belege auslesen und Monat pruefen dauern Minuten. Sie in einer offenen
+ * HTTP-Anfrage abzuwarten hat zweierlei gekostet: der Reverse-Proxy kappte die
+ * Verbindung nach 100 Sekunden ohne Daten (Cloudflare 524), und wer das
+ * Fenster wechselte oder neu lud, verlor den Lauf mitsamt Ergebnis.
+ *
+ * Der Server fuehrt den Vorgang deshalb selbst zu Ende und haelt den Stand
+ * bereit. Die Oberflaeche fragt ihn kurz ab, wann immer sie mag.
+ */
+export type VorgangsArt = 'ki-belege' | 'ki-pruefung' | 'ablage-vorschau' | 'ablage';
+
+export type VorgangsStatus = 'laeuft' | 'fertig' | 'fehler';
+
+export interface Vorgang {
+  id: string;
+  art: VorgangsArt;
+  monat: string;
+  /** Ueberschrift fuer die Oberflaeche */
+  titel: string;
+  status: VorgangsStatus;
+  /** Letzter Stand je Schritt, in der Reihenfolge des ersten Auftretens */
+  fortschritt: LadeFortschritt[];
+  /** Nur bei status "fertig" - die Form haengt an der Art */
+  ergebnis?: unknown;
+  /** Nur bei status "fehler" */
+  fehler?: string;
+  gestartetAm: string;
+  beendetAm?: string;
+}
+
+/** Antwort beim Starten: der Vorgang laeuft bereits. */
+export interface VorgangGestartet {
+  id: string;
+}
+
 /** Ereignisse des Lade-Streams (Server-Sent Events). */
 export type LadeEreignis =
   | { art: 'fortschritt'; fortschritt: LadeFortschritt }

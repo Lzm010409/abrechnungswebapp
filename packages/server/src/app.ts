@@ -12,6 +12,7 @@ import { Datenbank } from './db/index.js';
 import { StandardRechnungsProvider } from './invoices/provider.js';
 import { MonatsDienst } from './monatsdienst.js';
 import { registriereRouten } from './routes/index.js';
+import { Vorgaenge } from './vorgaenge.js';
 import { SevDeskClient } from './sevdesk/client.js';
 import { Dateiablage } from './storage/dateien.js';
 
@@ -221,6 +222,7 @@ export async function baueApp(config: Config): Promise<AppInstanz> {
     kiModell: config.anthropic?.modell,
     authDeaktiviert: config.auth.deaktiviert,
     ablageOptionen: config.ablage,
+    vorgaenge: new Vorgaenge(app.log),
   });
 
   // Gebautes Frontend ausliefern, sofern vorhanden (Produktion / Docker).

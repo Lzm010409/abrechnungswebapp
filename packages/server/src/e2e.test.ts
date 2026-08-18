@@ -10,7 +10,7 @@ import type {
   LadeEreignis,
   Monat,
   MonatsStatus,
-  VorgangsEreignis,
+  Vorgang,
 } from '@abrechnung/shared';
 import { baueApp } from './app.js';
 import type { Config } from './config.js';
@@ -51,15 +51,6 @@ function tx(
   };
 }
 
-/** Wie leseEreignisse, nur fuer Vorgaenge mit offenem Ergebnistyp. */
-function leseVorgang(rohtext: string): VorgangsEreignis[] {
-  return rohtext
-    .split('\n\n')
-    .flatMap((block) => block.split('\n'))
-    .filter((zeile) => zeile.startsWith('data:'))
-    .map((zeile) => JSON.parse(zeile.slice(5).trim()) as VorgangsEreignis);
-}
-
 /** Zerlegt eine Server-Sent-Events-Antwort in die einzelnen Ereignisse. */
 function leseEreignisse(rohtext: string): LadeEreignis[] {
   return rohtext
@@ -98,6 +89,26 @@ describe('End-to-End: gesamte Programmkette', () => {
   let app: FastifyInstance;
   let db: Datenbank;
   let dataDir: string;
+
+  /**
+   * Startet einen Hintergrundvorgang und wartet, bis er durch ist.
+   *
+   * Die Langlaeufer antworten sofort mit 202 und arbeiten weiter - abgefragt
+   * wird ueber /api/vorgaenge/:id. Genau so macht es auch die Oberflaeche.
+   */
+  const fuehreVorgangAus = async (url: string): Promise<Vorgang> => {
+    const start = await app.inject({ method: 'POST', url });
+    expect(start.statusCode).toBe(202);
+
+    const id = start.json<Vorgang>().id;
+
+    for (let versuch = 0; versuch < 400; versuch++) {
+      const stand = (await app.inject({ url: `/api/vorgaenge/${id}` })).json<Vorgang>();
+      if (stand.status !== 'laeuft') return stand;
+      await new Promise<void>((f) => setTimeout(f, 25));
+    }
+    throw new Error(`Vorgang ${url} wurde nicht fertig`);
+  };
 
   const starteApp = async (ueberschreibungen: Partial<Config> = {}) => {
     const config: Config = {
@@ -517,41 +528,51 @@ describe('End-to-End: gesamte Programmkette', () => {
     it('meldet die Einteilung als Vorgang, nicht als stilles Warten', async () => {
       await app.inject({ url: `/api/months/${MONAT}` });
 
-      const res = await app.inject({
+      const vorgang = await fuehreVorgangAus(`/api/months/${MONAT}/ablage/job`);
+
+      expect(vorgang.status).toBe('fertig');
+      expect(vorgang.art).toBe('ablage-vorschau');
+      expect(vorgang.fortschritt.map((f) => f.schritt)).toContain('einteilung');
+    });
+
+    it('antwortet sofort, statt den Lauf abzuwarten', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+
+      const start = await app.inject({
         method: 'POST',
-        url: `/api/months/${MONAT}/ablage/stream`,
+        url: `/api/months/${MONAT}/ablage/job`,
       });
 
-      expect(res.statusCode).toBe(200);
-      expect(res.headers['content-type']).toContain('text/event-stream');
-
-      const ereignisse = leseVorgang(res.payload);
-      const schritte = ereignisse
-        .filter((e) => e.art === 'fortschritt')
-        .map((e) => (e.art === 'fortschritt' ? e.fortschritt.schritt : undefined));
-
-      expect(schritte).toContain('einteilung');
-      expect(ereignisse.at(-1)!.art).toBe('fertig');
+      // 202: angenommen, laeuft. Genau das verhindert den Proxy-Zeitablauf.
+      expect(start.statusCode).toBe(202);
+      expect(start.json<Vorgang>().status).toBe('laeuft');
     });
 
     it('bleibt ohne konfigurierte Webhooks bei der Vorschau', async () => {
       await app.inject({ url: `/api/months/${MONAT}` });
 
-      const ereignisse = leseVorgang(
-        (
-          await app.inject({
-            method: 'POST',
-            url: `/api/months/${MONAT}/ablage/stream?ausfuehren=true`,
-          })
-        ).payload,
+      const vorgang = await fuehreVorgangAus(
+        `/api/months/${MONAT}/ablage/job?ausfuehren=true`,
       );
 
-      const letztes = ereignisse.at(-1)!;
-      expect(letztes.art).toBe('fertig');
-      const ergebnis = (letztes as { ergebnis: { ausgefuehrt: boolean; hinweis?: string } })
-        .ergebnis;
+      const ergebnis = vorgang.ergebnis as { ausgefuehrt: boolean; hinweis?: string };
       expect(ergebnis.ausgefuehrt).toBe(false);
       expect(ergebnis.hinweis).toContain('N8N_ORDNER_URL');
+    });
+
+    it('haelt den Vorgang abrufbar und laesst ihn danach vergessen', async () => {
+      await app.inject({ url: `/api/months/${MONAT}` });
+      const vorgang = await fuehreVorgangAus(`/api/months/${MONAT}/ablage/job`);
+
+      // In der Monatsliste steht er, bis die Oberflaeche ihn gesehen hat.
+      const liste = (await app.inject({ url: `/api/vorgaenge?monat=${MONAT}` })).json<
+        Vorgang[]
+      >();
+      expect(liste.map((v) => v.id)).toContain(vorgang.id);
+
+      expect((await app.inject({ method: 'DELETE', url: `/api/vorgaenge/${vorgang.id}` }))
+        .statusCode).toBe(204);
+      expect((await app.inject({ url: `/api/vorgaenge/${vorgang.id}` })).statusCode).toBe(404);
     });
   });
 
@@ -1467,76 +1488,54 @@ describe('End-to-End: gesamte Programmkette', () => {
     it('meldet beim Auslesen jeden Beleg einzeln', async () => {
       await app.inject({ url: `/api/months/${MONAT}` });
 
-      const res = await app.inject({
-        method: 'POST',
-        url: `/api/months/${MONAT}/ai/extract/stream`,
-      });
+      const vorgang = await fuehreVorgangAus(`/api/months/${MONAT}/ai/extract/job`);
 
-      expect(res.statusCode).toBe(200);
-      expect(res.headers['content-type']).toContain('text/event-stream');
-
-      const ereignisse = leseVorgang(res.payload);
-      const staende = ereignisse
-        .filter((e) => e.art === 'fortschritt')
-        .map((e) => (e.art === 'fortschritt' ? e.fortschritt : undefined)!);
+      expect(vorgang.status).toBe('fertig');
+      const staende = vorgang.fortschritt;
 
       // Erst das Zusammenstellen, dann je ein Stand nach jedem Beleg.
       expect(staende[0]).toMatchObject({ schritt: 'sammeln' });
       expect(staende.map((f) => f.schritt)).toContain('lesen');
-      expect(staende.filter((f) => f.schritt === 'lesen').at(-1)).toMatchObject({
+      expect(staende.find((f) => f.schritt === 'lesen')).toMatchObject({
         erledigt: 2,
         gesamt: 2,
       });
       expect(staende.at(-1)).toMatchObject({ schritt: 'uebernehmen' });
 
-      const letztes = ereignisse.at(-1)!;
-      expect(letztes.art).toBe('fertig');
-      expect((letztes as { ergebnis: { neuAnalysiert: number } }).ergebnis.neuAnalysiert).toBe(2);
+      expect((vorgang.ergebnis as { neuAnalysiert: number }).neuAnalysiert).toBe(2);
     });
 
     it('schickt dieselbe Datei kein zweites Mal an das Modell', async () => {
       await app.inject({ url: `/api/months/${MONAT}` });
-      await app.inject({ method: 'POST', url: `/api/months/${MONAT}/ai/extract/stream` });
+      await fuehreVorgangAus(`/api/months/${MONAT}/ai/extract/job`);
       const nachErstem = anfragen;
 
-      await app.inject({ method: 'POST', url: `/api/months/${MONAT}/ai/extract/stream` });
+      await fuehreVorgangAus(`/api/months/${MONAT}/ai/extract/job`);
       expect(anfragen).toBe(nachErstem);
     });
 
     it('meldet bei der Pruefung, worauf gewartet wird', async () => {
       await app.inject({ url: `/api/months/${MONAT}` });
 
-      const ereignisse = leseVorgang(
-        (
-          await app.inject({
-            method: 'POST',
-            url: `/api/months/${MONAT}/ai/review/stream`,
-          })
-        ).payload,
-      );
-
-      const schritte = ereignisse
-        .filter((e) => e.art === 'fortschritt')
-        .map((e) => (e.art === 'fortschritt' ? e.fortschritt.schritt : undefined));
+      const vorgang = await fuehreVorgangAus(`/api/months/${MONAT}/ai/review/job`);
+      const schritte = vorgang.fortschritt.map((f) => f.schritt);
 
       // Mehrere benannte Schritte statt einer nichtssagenden Zeile.
       expect(schritte).toContain('sammeln');
       expect(schritte).toContain('modell');
       expect(schritte).toContain('befunde');
-      expect(ereignisse.at(-1)!.art).toBe('fertig');
+      expect(vorgang.status).toBe('fertig');
     });
 
     it('meldet einen Ausfall als Ereignis, nicht als Abbruch', async () => {
       await app.inject({ url: `/api/months/${MONAT}` });
       await new Promise<void>((f) => claude.close(() => f()));
 
-      const res = await app.inject({
-        method: 'POST',
-        url: `/api/months/${MONAT}/ai/review/stream`,
-      });
+      const vorgang = await fuehreVorgangAus(`/api/months/${MONAT}/ai/review/job`);
 
-      expect(res.statusCode).toBe(200);
-      expect(leseVorgang(res.payload).at(-1)!.art).toBe('fehler');
+      // Der Vorgang scheitert - aber als Zustand, nicht als abgebrochene Anfrage.
+      expect(vorgang.status).toBe('fehler');
+      expect(vorgang.fehler).toBeTruthy();
       // Damit afterEach nicht ueber den geschlossenen Server stolpert
       claude = createServer();
     });

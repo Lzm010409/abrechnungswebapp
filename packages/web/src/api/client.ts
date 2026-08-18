@@ -6,7 +6,7 @@ import type {
   Monat,
   MonatsReview,
   PositionsPatch,
-  VorgangsEreignis,
+  Vorgang,
   ZuordnungsVorschlag,
 } from '@abrechnung/shared';
 
@@ -102,68 +102,16 @@ export async function leseLadeStream(
 }
 
 /**
- * Liest einen Vorgangs-Strom und liefert am Ende dessen Ergebnis.
+ * Startet einen Hintergrundvorgang und gibt sofort dessen Kennung zurueck.
  *
- * Dieselbe Mechanik wie beim Monatsladen, nur fuer Vorgaenge mit offenem
- * Ergebnistyp: die KI-Funktionen dauern lange genug, dass die Oberflaeche
- * zeigen sollte, woran gerade gearbeitet wird.
+ * Frueher wurde hier auf einen Ereignisstrom gewartet, bis der Vorgang fertig
+ * war. Das ging schief, sobald das Modell laenger als 100 Sekunden brauchte:
+ * Cloudflare kappte die Verbindung ohne Daten mit einem 524, und der Nutzer
+ * sah einen Fehler, obwohl der Server weiterarbeitete. Jetzt wird nur noch
+ * angestossen - den Stand holt `vorgang()`.
  */
-export async function fuehreVorgangAus<T>(
-  pfad: string,
-  aufFortschritt: (fortschritt: LadeFortschritt) => void,
-  signal?: AbortSignal,
-): Promise<T> {
-  const res = await fetch(pfad, {
-    method: 'POST',
-    headers: { Accept: 'text/event-stream' },
-    signal,
-  });
-
-  if (!res.ok) {
-    let meldung = `HTTP ${res.status}`;
-    try {
-      const body = (await res.json()) as { fehler?: string };
-      if (body.fehler) meldung = body.fehler;
-    } catch {
-      // kein JSON - Statuscode genuegt
-    }
-    throw new ApiFehler(meldung, res.status);
-  }
-  if (!res.body) throw new ApiFehler('Der Server liefert keinen Datenstrom.', 500);
-
-  const leser = res.body.getReader();
-  const dekoder = new TextDecoder();
-  let puffer = '';
-  let ergebnis: T | undefined;
-  let fehler: string | undefined;
-
-  for (;;) {
-    const { done, value } = await leser.read();
-    if (done) break;
-    puffer += dekoder.decode(value, { stream: true });
-
-    let ende = puffer.indexOf('\n\n');
-    while (ende >= 0) {
-      const block = puffer.slice(0, ende);
-      puffer = puffer.slice(ende + 2);
-
-      for (const zeile of block.split('\n')) {
-        if (!zeile.startsWith('data:')) continue;
-        const ereignis = JSON.parse(zeile.slice(5).trim()) as VorgangsEreignis;
-
-        if (ereignis.art === 'fortschritt') aufFortschritt(ereignis.fortschritt);
-        else if (ereignis.art === 'fertig') ergebnis = ereignis.ergebnis as T;
-        else fehler = ereignis.fehler;
-      }
-      ende = puffer.indexOf('\n\n');
-    }
-  }
-
-  if (fehler !== undefined) throw new ApiFehler(fehler, 500);
-  if (ergebnis === undefined) {
-    throw new ApiFehler('Der Vorgang endete ohne Ergebnis.', 500);
-  }
-  return ergebnis;
+async function starteVorgang(pfad: string): Promise<Vorgang> {
+  return anfrage<Vorgang>(pfad, { method: 'POST' });
 }
 
 export const api = {
@@ -242,29 +190,25 @@ export const api = {
       { method: 'POST' },
     ),
 
-  /**
-   * Dasselbe mit Fortschritt: welcher Beleg gerade nach OneDrive geht.
-   *
-   * Bei fuenfzig Belegen dauert der Lauf Minuten - ohne Rueckmeldung sieht die
-   * Oberflaeche so lange aus, als sei sie stehengeblieben.
-   */
-  ablageMitFortschritt: (
-    monat: string,
-    ausfuehren: boolean,
-    aufFortschritt: (f: LadeFortschritt) => void,
-  ) =>
-    fuehreVorgangAus<AblageErgebnis>(
-      `/api/months/${monat}/ablage/stream${ausfuehren ? '?ausfuehren=true' : ''}`,
-      aufFortschritt,
+  /** Startet die Ablage (oder deren Vorschau) als Hintergrundvorgang. */
+  starteAblage: (monat: string, ausfuehren: boolean) =>
+    starteVorgang(
+      `/api/months/${monat}/ablage/job${ausfuehren ? '?ausfuehren=true' : ''}`,
     ),
 
+  /** Alle bekannten Vorgaenge eines Monats, neueste zuerst. */
+  vorgaenge: (monat: string) =>
+    anfrage<Vorgang[]>(`/api/vorgaenge?monat=${encodeURIComponent(monat)}`),
+
+  vorgang: (id: string) => anfrage<Vorgang>(`/api/vorgaenge/${id}`),
+
+  /** Nimmt einen abgeschlossenen Vorgang aus der Liste. */
+  vergissVorgang: (id: string) =>
+    anfrage<void>(`/api/vorgaenge/${id}`, { method: 'DELETE' }),
+
   ki: {
-    /** Liest die Belege aus und meldet dabei, welcher gerade drankommt. */
-    extrahiere: (monat: string, aufFortschritt: (f: LadeFortschritt) => void) =>
-      fuehreVorgangAus<{ neuAnalysiert: number; monat: Monat }>(
-        `/api/months/${monat}/ai/extract/stream`,
-        aufFortschritt,
-      ),
+    /** Startet das Auslesen aller Belege als Hintergrundvorgang. */
+    extrahiere: (monat: string) => starteVorgang(`/api/months/${monat}/ai/extract/job`),
 
     schlageZuordnungVor: (monat: string) =>
       anfrage<{ vorschlaege: ZuordnungsVorschlag[] }>(`/api/months/${monat}/ai/match`, {
@@ -277,11 +221,8 @@ export const api = {
         { method: 'POST' },
       ),
 
-    pruefe: (monat: string, aufFortschritt: (f: LadeFortschritt) => void) =>
-      fuehreVorgangAus<MonatsReview>(
-        `/api/months/${monat}/ai/review/stream`,
-        aufFortschritt,
-      ),
+    /** Startet die Monatspruefung als Hintergrundvorgang. */
+    pruefe: (monat: string) => starteVorgang(`/api/months/${monat}/ai/review/job`),
   },
 };
 
