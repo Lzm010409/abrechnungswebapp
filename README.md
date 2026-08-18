@@ -275,10 +275,31 @@ die Anwendung stattdessen eine Kopie aus sevDesk in den Unterordner, hat man
 die Datei zweimal: einmal einsortiert, einmal weiter lose daneben. Mit zwei
 weiteren Workflows wird die vorhandene Datei einfach verschoben:
 
-| Variable | Workflow soll | Aufruf |
+Beide Workflows sind angelegt und **aktiv**:
+
+| Variable | Workflow | ID |
 |---|---|---|
-| `N8N_ORDNER_DATEIEN_URL` | die Dateien eines Ordners auflisten | `POST [{ "ordnerId": "…" }]` |
-| `N8N_VERSCHIEBE_URL` | eine Datei in einen Unterordner verschieben | `POST { "ordnerId", "unterordner", "dateiId" }` |
+| `N8N_ORDNER_DATEIEN_URL` | Dateien im Ausgabenordner auflisten | `36PpOH5G9eeR3Nrk` |
+| `N8N_VERSCHIEBE_URL` | Beleg in Unterordner verschieben | `1MhUDMaKTRmjA90T` |
+
+```
+N8N_ORDNER_DATEIEN_URL=https://n8n-coolify.gollenstede.app/webhook/b3f1c2a4-5d6e-4f70-8a91-2c3d4e5f6a71
+N8N_VERSCHIEBE_URL=https://n8n-coolify.gollenstede.app/webhook/c4e2d3b5-6f70-4a81-9b02-3d4e5f60718a
+```
+
+```
+POST [{ "ordnerId": "017CTAN…" }]
+→    [ { "id": "01ABC…", "name": "Scan_20260622.pdf", "size": 8421 }, … ]
+
+POST { "ordnerId": "017CTAN…", "unterordner": "Konto", "dateiId": "01ABC…" }
+→    das verschobene Element, oder 404 wenn es den Unterordner nicht gibt
+```
+
+> Beide antworten über einen **Respond-to-Webhook**-Knoten, nicht über *Last
+> Node*. Beim Auflisten ist das zwingend: *Last Node* gäbe nur den **ersten**
+> Eintrag zurück statt der ganzen Liste. Fehlt der Zielordner beim Verschieben,
+> kommt bewusst ein **404** mit Meldung — sonst wäre ein fehlgeschlagenes
+> Verschieben von einem erfolgreichen nicht zu unterscheiden.
 
 Die Liste wird gelesen wie überall bei n8n — ohne feste Feldnamen. Erkannt
 werden `id`/`itemId`/`driveItemId`, `name`/`filename` und `size`; Einträge mit
