@@ -47,6 +47,9 @@ async function anfrage<T>(pfad: string, init?: RequestInit): Promise<T> {
     throw new ApiFehler(meldung, res.status);
   }
 
+  // 204 hat keinen Koerper - res.json() wuerde daran scheitern.
+  if (res.status === 204) return undefined as T;
+
   return (await res.json()) as T;
 }
 

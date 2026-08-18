@@ -22,6 +22,7 @@ import { Detailbereich } from './components/Detailbereich';
 import { Kontoauszuege } from './components/Kontoauszuege';
 import { Ladefortschritt } from './components/Ladefortschritt';
 import { PositionenTabelle } from './components/PositionenTabelle';
+import { Pruefbericht } from './components/Pruefbericht';
 import { Sammelaktionen } from './components/Sammelaktionen';
 import { Vorgangsanzeige } from './components/Vorgangsanzeige';
 import { Vorgangsleiste } from './components/Vorgangsleiste';
@@ -202,7 +203,17 @@ export function App() {
         if (!aktiv) return;
 
         setVorgaenge(liste.filter((v) => v.status === 'laeuft'));
-        for (const v of liste) if (v.status !== 'laeuft') uebernimm(v);
+
+        for (const v of liste) {
+          if (v.status === 'laeuft') continue;
+          try {
+            uebernimm(v);
+          } catch (err) {
+            // Ein Ergebnis, mit dem die Oberflaeche nichts anfangen kann, darf
+            // nicht die Abfrage der uebrigen Vorgaenge mitreissen.
+            setFehler(`${v.titel}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
       } catch {
         // Netzaussetzer sind kein Grund, die Abfrage einzustellen - beim
         // naechsten Durchgang klappt es womoeglich wieder.
@@ -211,9 +222,24 @@ export function App() {
 
     void abfragen();
     const takt = setInterval(() => void abfragen(), 1500);
+
+    /*
+     * Sofort nachfragen, sobald der Tab wieder sichtbar wird.
+     *
+     * Browser drosseln setInterval in Hintergrundtabs auf einmal pro Minute.
+     * Wer die Pruefung startet und in einen anderen Tab wechselt, sah das
+     * Ergebnis deshalb erst mit bis zu einer Minute Verspaetung - was sich
+     * anfuehlte, als bliebe die Anzeige haengen, bis man neu laedt.
+     */
+    const beiSichtbar = () => {
+      if (document.visibilityState === 'visible') void abfragen();
+    };
+    document.addEventListener('visibilitychange', beiSichtbar);
+
     return () => {
       aktiv = false;
       clearInterval(takt);
+      document.removeEventListener('visibilitychange', beiSichtbar);
     };
   }, [monat, uebernimm]);
 
@@ -446,32 +472,12 @@ export function App() {
             />
           )}
 
-          {review && (
-            <section className="review">
-              <h4>KI-Prüfung</h4>
-              <p>{review.zusammenfassung}</p>
-              {review.auffaelligkeiten.length === 0 ? (
-                <p className="grau klein">Keine Auffälligkeiten gefunden.</p>
-              ) : (
-                <ul>
-                  {review.auffaelligkeiten.map((b, i) => (
-                    <li key={i} className={b.schwere}>
-                      <strong>{b.titel}</strong>
-                      <p>{b.beschreibung}</p>
-                      {b.positionIds.length > 0 && (
-                        <p className="klein">
-                          {b.positionIds.map((id) => (
-                            <button key={id} className="verweis" onClick={() => setAusgewaehlt(id)}>
-                              Buchung anzeigen
-                            </button>
-                          ))}
-                        </p>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
+          {review && daten && (
+            <Pruefbericht
+              review={review}
+              positionen={daten.positionen}
+              onWaehle={setAusgewaehlt}
+            />
           )}
         </div>
 

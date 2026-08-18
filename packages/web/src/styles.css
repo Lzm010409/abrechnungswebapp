@@ -284,6 +284,22 @@ table.positionen {
 .review li p { margin: 4px 0; font-size: 13px; }
 .verweis { background: none; border: none; color: var(--akzent); cursor: pointer; padding: 0; font-size: 12px; }
 
+.befund-kopf { display: flex; align-items: baseline; gap: 8px; }
+.marke.schwere.hinweis { background: #eef1f4; color: var(--grau); }
+.marke.schwere.warnung { background: #fdf0d5; color: #8a6100; }
+.marke.schwere.fehler { background: #fdecec; color: var(--fehler); }
+
+/* Ein Verweis je Zeile. Frueher standen hier bis zu sieben gleichlautende
+   "Buchung anzeigen" ohne Trennung hintereinander. */
+.befund-buchungen { margin: 6px 0 0; padding: 0; }
+.befund-buchungen li {
+  border: none;
+  padding: 1px 0;
+  margin: 0;
+}
+.befund-buchungen .verweis { text-align: left; }
+.befund-buchungen .verweis:hover { text-decoration: underline; }
+
 /* -- Aktionsleiste ---------------------------------------------------- */
 
 .aktionsleiste {
@@ -503,6 +519,16 @@ code { background: #f1f3f5; padding: 1px 4px; border-radius: 3px; font-size: 12p
 /* Von Hand gesetzter Zielordner - bewusst blass, es ist eine Notiz zur
    Ablage und kein Zustand der Buchung selbst. */
 .marke.ablageordner { background: #f0f0ee; color: #55534d; }
+
+/* Verschieben ist der Regelfall und unauffaellig; hochladen faellt auf, weil
+   dabei eine zweite Kopie derselben Datei entsteht. */
+.marke.aktion { margin: 0 6px 0 0; }
+.marke.aktion.verschieben { background: #e6f4ea; color: #1e7b34; }
+.marke.aktion.hochladen { background: #fdf0d5; color: #8a6100; }
+
+.ablage .uebrig { margin: 8px 0; }
+.ablage .uebrig summary { cursor: pointer; }
+.ablage .uebrig ul { margin: 4px 0 0 14px; }
 
 /* -- Hintergrundvorgaenge ---------------------------------------------- */
 

@@ -5,6 +5,7 @@ import type {
   BelegDatei,
   LadeFortschritt,
   Monat,
+  OneDriveDatei,
   Position,
 } from '@abrechnung/shared';
 import { leseSeitentexte, ordneBuchungenSeitenZu } from '../pdf/seitenzuordnung.js';
@@ -44,6 +45,15 @@ export interface AblageOptionen {
   ordnerUrl?: string;
   /** Webhook, der eine Datei in einen Unterordner legt. */
   ablageUrl?: string;
+  /**
+   * Webhook, der die Dateien eines Ordners auflistet.
+   *
+   * Ohne ihn kennt die Ablage nur die Belege aus sevDesk und laedt Kopien
+   * hoch - die Originale bleiben lose im Monatsordner liegen.
+   */
+  ordnerDateienUrl?: string;
+  /** Webhook, der eine vorhandene Datei in einen Unterordner verschiebt. */
+  verschiebeUrl?: string;
   authHeader?: string;
   authValue?: string;
   fetchImpl?: typeof fetch;
@@ -175,23 +185,50 @@ export class OneDriveAblage {
       gesamt: 1,
     });
 
+    // Was liegt schon im Monatsordner? Diese Dateien werden verschoben statt
+    // durch eine sevDesk-Kopie verdoppelt.
+    melde({
+      phase: 'dateien',
+      schritt: 'abgleich',
+      titel: 'Vorhandene Dateien werden abgeglichen',
+      text: 'Monatsordner wird gelesen',
+    });
+
+    const vorhanden = await this.listeOrdner(ordnerId);
+    const { zugeordnet, uebrig } = ordneZu(einteilung, vorhanden);
+
+    melde({
+      phase: 'dateien',
+      schritt: 'abgleich',
+      titel: 'Vorhandene Dateien werden abgeglichen',
+      text: beschreibeAbgleich(zugeordnet, vorhanden.length, uebrig.length),
+      erledigt: 1,
+      gesamt: 1,
+    });
+
     const erledigt: AblageEintrag[] = [];
-    for (const [i, eintrag] of einteilung.entries()) {
+    for (const [i, eintrag] of zugeordnet.entries()) {
       melde({
         phase: 'dateien',
         schritt: 'ablegen',
         titel: 'Belege werden abgelegt',
-        text: `${eintrag.dateiname} → ${eintrag.ordner}`,
+        text:
+          `${eintrag.aktion === 'verschieben' ? 'verschieben' : 'hochladen'}: ` +
+          `${eintrag.dateiname} → ${eintrag.ordner}`,
         erledigt: i,
-        gesamt: einteilung.length,
+        gesamt: zugeordnet.length,
       });
 
       // Vor jeder Datei ausser der ersten kurz Luft holen.
       if (i > 0 && this.pauseMs > 0) await this.schlaf(this.pauseMs);
 
       try {
-        const daten = await this.deps.ladeDatei(eintrag.dateiId);
-        await this.legeDateiAb(ordnerId, eintrag.ordner, eintrag.dateiname, daten);
+        if (eintrag.aktion === 'verschieben' && eintrag.quelle) {
+          await this.verschiebeDatei(ordnerId, eintrag.ordner, eintrag.quelle.id);
+        } else {
+          const daten = await this.deps.ladeDatei(eintrag.dateiId);
+          await this.legeDateiAb(ordnerId, eintrag.ordner, eintrag.dateiname, daten);
+        }
         erledigt.push(eintrag);
       } catch (err) {
         const meldung = err instanceof Error ? err.message : String(err);
@@ -208,9 +245,9 @@ export class OneDriveAblage {
       phase: 'dateien',
       schritt: 'ablegen',
       titel: 'Belege werden abgelegt',
-      text: `${geschafft} von ${einteilung.length} abgelegt`,
-      erledigt: einteilung.length,
-      gesamt: einteilung.length,
+      text: `${geschafft} von ${zugeordnet.length} abgelegt`,
+      erledigt: zugeordnet.length,
+      gesamt: zugeordnet.length,
     });
 
     this.deps.log?.info(
@@ -224,6 +261,7 @@ export class OneDriveAblage {
       ordnerId,
       eintraege: erledigt,
       ohneBeleg,
+      uebrig,
     };
   }
 
@@ -260,6 +298,7 @@ export class OneDriveAblage {
           positionId: position.id,
           dateiId: datei.id,
           dateiname: datei.dateiname,
+          groesse: datei.groesse,
           ordner,
           begruendung: vonHand
             ? 'an der Buchung von Hand gesetzt'
@@ -310,6 +349,37 @@ export class OneDriveAblage {
     const antwort = await this.rufe(this.opts.ordnerUrl!, [{ jahr, monat }]);
 
     return { ordnerId: sucheOrdnerId(antwort), antwort: kuerze(antwort) };
+  }
+
+  /**
+   * Die Dateien, die schon im Monatsordner liegen.
+   *
+   * Ohne den Workflow bleibt die Liste leer - dann wird wie bisher aus sevDesk
+   * hochgeladen. Ein Fehlschlag ist ebenfalls kein Abbruchgrund: hochladen ist
+   * schlechter als verschieben, aber immer noch besser als gar nichts.
+   */
+  private async listeOrdner(ordnerId: string): Promise<OneDriveDatei[]> {
+    if (!this.opts.ordnerDateienUrl || !this.opts.verschiebeUrl) return [];
+
+    try {
+      const antwort = await this.rufe(this.opts.ordnerDateienUrl, [{ ordnerId }]);
+      return leseDateiliste(antwort);
+    } catch (err) {
+      this.deps.log?.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'Monatsordner liess sich nicht auflisten - es wird hochgeladen statt verschoben',
+      );
+      return [];
+    }
+  }
+
+  /** Verschiebt eine bereits vorhandene Datei in den Unterordner. */
+  private async verschiebeDatei(
+    ordnerId: string,
+    unterordner: Ablageordner,
+    dateiId: string,
+  ): Promise<void> {
+    await this.rufe(this.opts.verschiebeUrl!, { ordnerId, unterordner, dateiId });
   }
 
   private async legeDateiAb(
@@ -434,6 +504,133 @@ function leseRetryAfter(wert: string | null): number | undefined {
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * Ordnet jedem Beleg die Datei zu, die in OneDrive schon dafuer liegt.
+ *
+ * Der Sinn: die Belege sind bereits im Monatsordner - sie muessen nur in den
+ * richtigen Unterordner. Wer stattdessen eine Kopie aus sevDesk hochlaedt,
+ * hat die Datei doppelt und das Original weiterhin lose herumliegen.
+ *
+ * Zugeordnet wird in zwei Stufen, die staerkere zuerst:
+ *
+ *  1. gleicher Dateiname - traegt bei allem, was von Hand hochgeladen wurde
+ *     oder dessen Name sevDesk unveraendert uebernommen hat
+ *  2. gleiche Groesse in Bytes, und zwar eindeutig - denselben Beleg zweimal
+ *     mit identischer Bytezahl gibt es praktisch nicht, verschiedene mit
+ *     zufaellig gleicher Groesse aber sehr wohl. Bei mehreren Kandidaten wird
+ *     deshalb nicht geraten.
+ *
+ * Was sich nicht zuordnen laesst, wird hochgeladen wie bisher. Was in OneDrive
+ * uebrig bleibt, wird gemeldet statt stillschweigend liegen gelassen - dort
+ * zeigt sich, wo der Abgleich danebenliegt.
+ */
+export function ordneZu(
+  eintraege: AblageEintrag[],
+  vorhanden: OneDriveDatei[],
+): { zugeordnet: AblageEintrag[]; uebrig: OneDriveDatei[] } {
+  const frei = new Map(vorhanden.map((d) => [d.id, d]));
+
+  const nimm = (datei: OneDriveDatei, abgleich: string) => {
+    frei.delete(datei.id);
+    return { aktion: 'verschieben' as const, quelle: datei, abgleich };
+  };
+
+  // Erst alle Namenstreffer, dann die Groessen: sonst koennte eine
+  // Groessenuebereinstimmung eine Datei wegschnappen, die namentlich
+  // eindeutig zu einem spaeteren Beleg gehoert.
+  const zugeordnet: AblageEintrag[] = eintraege.map((e) => ({ ...e }));
+
+  for (const eintrag of zugeordnet) {
+    const treffer = [...frei.values()].find(
+      (d) => normalisiere(d.dateiname) === normalisiere(eintrag.dateiname),
+    );
+    if (treffer) Object.assign(eintrag, nimm(treffer, 'gleicher Dateiname'));
+  }
+
+  for (const eintrag of zugeordnet) {
+    if (eintrag.aktion) continue;
+
+    const kandidaten = [...frei.values()].filter(
+      (d) => d.groesse !== undefined && d.groesse === eintrag.groesse,
+    );
+    if (kandidaten.length === 1) {
+      Object.assign(eintrag, nimm(kandidaten[0]!, 'gleiche Groesse'));
+    }
+  }
+
+  for (const eintrag of zugeordnet) {
+    if (!eintrag.aktion) eintrag.aktion = 'hochladen';
+  }
+
+  return { zugeordnet, uebrig: [...frei.values()] };
+}
+
+/** Gross-/Kleinschreibung und Leerraum sollen den Abgleich nicht verhindern. */
+function normalisiere(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/** Kurzer Satz fuer die Fortschrittsanzeige. */
+function beschreibeAbgleich(
+  zugeordnet: AblageEintrag[],
+  gefunden: number,
+  uebrig: number,
+): string {
+  if (gefunden === 0) {
+    return 'keine vorhandenen Dateien gefunden - es wird hochgeladen';
+  }
+  const verschoben = zugeordnet.filter((e) => e.aktion === 'verschieben').length;
+  return `${verschoben} verschieben, ${zugeordnet.length - verschoben} hochladen, ${uebrig} bleibt liegen`;
+}
+
+/**
+ * Liest die Dateiliste aus der Antwort des Workflows.
+ *
+ * Wie ueberall bei n8n: Feldnamen nicht fest verdrahten. Gesucht wird nach
+ * Objekten, die eine Kennung und einen Namen tragen; Ordner werden dabei
+ * uebersprungen, sie sollen nicht in sich selbst verschoben werden.
+ */
+export function leseDateiliste(wert: unknown): OneDriveDatei[] {
+  const roh = Array.isArray(wert) ? wert : [wert];
+  const dateien: OneDriveDatei[] = [];
+
+  for (const eintrag of roh) {
+    if (typeof eintrag !== 'object' || eintrag === null) continue;
+    const o = eintrag as Record<string, unknown>;
+
+    // OneDrive kennzeichnet Ordner mit einem "folder"-Objekt (childCount).
+    if (o.folder !== undefined && o.folder !== null) continue;
+
+    const id = ersterText(o, ['id', 'dateiId', 'itemId', 'driveItemId']);
+    const dateiname = ersterText(o, ['name', 'dateiname', 'filename', 'fileName']);
+    if (!id || !dateiname) continue;
+
+    const groesse = ersteZahl(o, ['size', 'groesse', 'sizeBytes']);
+    dateien.push({ id, dateiname, ...(groesse === undefined ? {} : { groesse }) });
+  }
+
+  return dateien;
+}
+
+function ersterText(o: Record<string, unknown>, felder: string[]): string | undefined {
+  for (const feld of felder) {
+    const wert = o[feld];
+    if (typeof wert === 'string' && wert.length > 0) return wert;
+  }
+  return undefined;
+}
+
+function ersteZahl(o: Record<string, unknown>, felder: string[]): number | undefined {
+  for (const feld of felder) {
+    const wert = o[feld];
+    if (typeof wert === 'number' && Number.isFinite(wert)) return wert;
+    if (typeof wert === 'string' && wert.trim() !== '' && Number.isFinite(Number(wert))) {
+      return Number(wert);
+    }
+  }
+  return undefined;
+}
 
 /**
  * Nur Ausgabenbelege werden einsortiert.

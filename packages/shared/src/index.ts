@@ -364,16 +364,46 @@ export function istAblageordner(wert: unknown): wert is Ablageordner {
   return typeof wert === 'string' && (ABLAGEORDNER as readonly string[]).includes(wert);
 }
 
+/** Eine Datei, die in OneDrive bereits liegt. */
+export interface OneDriveDatei {
+  /** OneDrive-Kennung, damit sich die Datei verschieben laesst */
+  id: string;
+  dateiname: string;
+  /** Bytes, sofern der Workflow sie mitliefert - Grundlage des Abgleichs */
+  groesse?: number;
+}
+
+/**
+ * Wie ein Beleg in den Unterordner kommt.
+ *
+ * "verschieben" ist der Regelfall und der ganze Witz der Sache: die Belege
+ * liegen bereits im Monatsordner, sie muessen nur einsortiert werden. Eine
+ * Kopie aus sevDesk hochzuladen wuerde die Datei verdoppeln und das Original
+ * lose liegen lassen.
+ *
+ * "hochladen" ist der Rueckfall fuer Belege, zu denen sich in OneDrive nichts
+ * Passendes finden liess - besser eine Kopie als ein fehlender Beleg.
+ */
+export type Ablageaktion = 'verschieben' | 'hochladen';
+
 /** Was mit einem einzelnen Beleg bei der Ablage geschehen ist bzw. soll. */
 export interface AblageEintrag {
   positionId: string;
   dateiId: string;
   dateiname: string;
+  /** Bytes des Belegs - Grundlage des Abgleichs mit OneDrive */
+  groesse?: number;
   ordner: Ablageordner;
   /** Kurze Begruendung der Einordnung, fuer die Anzeige */
   begruendung: string;
   /** true, wenn der Ordner an der Buchung von Hand gesetzt wurde */
   vonHand?: boolean;
+  /** Verschieben oder hochladen - siehe Ablageaktion */
+  aktion?: Ablageaktion;
+  /** Die zugeordnete Datei in OneDrive, wenn verschoben wird */
+  quelle?: OneDriveDatei;
+  /** Warum die Zuordnung zustande kam ("gleicher Name", "gleiche Groesse") */
+  abgleich?: string;
   /** Fehlermeldung, wenn die Ablage fehlschlug */
   fehler?: string;
 }
@@ -384,6 +414,13 @@ export interface AblageErgebnis {
   ausgefuehrt: boolean;
   /** Ordner-ID des Monats in OneDrive, sofern ermittelt */
   ordnerId?: string;
+  /**
+   * Dateien im Monatsordner, denen sich keine Buchung zuordnen liess.
+   *
+   * Sie bleiben liegen - und genau das muss sichtbar sein: hier zeigt sich,
+   * wo der Abgleich danebenliegt oder ein Beleg in sevDesk fehlt.
+   */
+  uebrig?: OneDriveDatei[];
   eintraege: AblageEintrag[];
   /** Buchungen ohne Beleg - koennen nicht abgelegt werden */
   ohneBeleg: number;

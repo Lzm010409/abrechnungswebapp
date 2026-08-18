@@ -105,6 +105,8 @@ ausschließlich für die Arbeit auf dem eigenen Rechner gedacht.
 | `N8N_FIND_RECHNUNG_URL` | nein | Ausgangsrechnungen kommen aus sevDesk statt als Original aus OneDrive |
 | `N8N_ORDNER_URL` | nein | Belegablage bleibt bei der Vorschau, es wird nichts nach OneDrive geschrieben |
 | `N8N_ABLAGE_URL` | nein | dito — beide Adressen müssen gesetzt sein |
+| `N8N_ORDNER_DATEIEN_URL` | nein | Belege werden als sevDesk-Kopie hochgeladen statt verschoben |
+| `N8N_VERSCHIEBE_URL` | nein | dito — beide Adressen müssen gesetzt sein |
 | `N8N_ABLAGE_PAUSE_MS` | nein | 350 ms Pause zwischen zwei Dateien |
 | `N8N_ABLAGE_VERSUCHE` | nein | 4 Versuche je Aufruf bei Überlast |
 | `ANTHROPIC_API_KEY` | nein | KI-Funktionen inaktiv, Rest läuft vollständig |
@@ -265,6 +267,44 @@ Die Ablage bekommt je Datei einen Aufruf, `inhalt` ist base64:
 POST { "ordnerId": "01ABCDEF…", "unterordner": "Bar",
        "dateiname": "0726_1800TG01.pdf", "inhalt": "<base64>" }
 ```
+
+#### Verschieben statt Hochladen (empfohlen)
+
+Die Belege **liegen bereits im Monatsordner** — dort werden sie abgelegt. Lädt
+die Anwendung stattdessen eine Kopie aus sevDesk in den Unterordner, hat man
+die Datei zweimal: einmal einsortiert, einmal weiter lose daneben. Mit zwei
+weiteren Workflows wird die vorhandene Datei einfach verschoben:
+
+| Variable | Workflow soll | Aufruf |
+|---|---|---|
+| `N8N_ORDNER_DATEIEN_URL` | die Dateien eines Ordners auflisten | `POST [{ "ordnerId": "…" }]` |
+| `N8N_VERSCHIEBE_URL` | eine Datei in einen Unterordner verschieben | `POST { "ordnerId", "unterordner", "dateiId" }` |
+
+Die Liste wird gelesen wie überall bei n8n — ohne feste Feldnamen. Erkannt
+werden `id`/`itemId`/`driveItemId`, `name`/`filename` und `size`; Einträge mit
+einem `folder`-Objekt werden übersprungen, damit kein Ordner in sich selbst
+wandert. Die OneDrive-Antwort passt also unverändert:
+
+```
+→ [ { "id": "01ABC…", "name": "Scan_20260622.pdf", "size": 8421 },
+    { "id": "01DEF…", "name": "Konto", "folder": { "childCount": 3 } } ]
+```
+
+**Der Abgleich** läuft in zwei Stufen, die stärkere zuerst:
+
+1. **gleicher Dateiname** — trägt bei allem, was von Hand hochgeladen wurde
+   oder dessen Name sevDesk unverändert übernommen hat
+2. **gleiche Größe in Bytes, und zwar eindeutig** — sevDesk-Belege heißen bei
+   uns `beleg-<voucherId>.pdf`, der Name des Originals ist ein ganz anderer.
+   Gibt es mehrere Dateien derselben Größe, wird **nicht geraten**
+
+Was sich nicht zuordnen lässt, wird hochgeladen wie bisher — besser eine Kopie
+als ein fehlender Beleg. Was in OneDrive übrig bleibt, steht in der Vorschau
+unter *„… ohne passende Buchung — bleiben liegen"*. Genau dort zeigt sich, wo
+der Abgleich danebenliegt oder ein Beleg in sevDesk fehlt.
+
+Sind die beiden Variablen nicht gesetzt, wird der Monatsordner gar nicht erst
+gelesen und alles läuft wie zuvor.
 
 **Gedrosselt, damit n8n nicht umkippt:** die Dateien gehen einzeln und
 nacheinander hinaus, dazwischen liegen 350 ms

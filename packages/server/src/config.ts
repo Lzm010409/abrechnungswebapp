@@ -52,6 +52,10 @@ export interface Config {
     ordnerUrl?: string;
     /** Webhook: legt eine Datei in einen Unterordner */
     ablageUrl?: string;
+    /** Webhook: listet die Dateien eines Ordners - Grundlage des Abgleichs */
+    ordnerDateienUrl?: string;
+    /** Webhook: verschiebt eine vorhandene Datei in einen Unterordner */
+    verschiebeUrl?: string;
     authHeader?: string;
     authValue?: string;
     /** Pause zwischen zwei Dateien, damit n8n nicht ueberrannt wird */
@@ -210,6 +214,10 @@ export function ladeConfig(): Config {
         ? {
             ordnerUrl,
             ablageUrl,
+            // Nur beide zusammen ergeben einen Sinn: ohne die Liste gibt es
+            // nichts zu verschieben, ohne das Verschieben nuetzt die Liste nichts.
+            ordnerDateienUrl: env('N8N_ORDNER_DATEIEN_URL'),
+            verschiebeUrl: env('N8N_VERSCHIEBE_URL'),
             authHeader: env('N8N_WEBHOOK_AUTH_HEADER'),
             authValue: env('N8N_WEBHOOK_AUTH_VALUE'),
             pauseMs: zahl('N8N_ABLAGE_PAUSE_MS'),

@@ -27,6 +27,9 @@ services:
       # zusammen schalten sie frei, sonst bleibt es bei der Vorschau
       N8N_ORDNER_URL: ${N8N_ORDNER_URL:-}
       N8N_ABLAGE_URL: ${N8N_ABLAGE_URL:-}
+      # Optional - vorhandene Dateien verschieben statt Kopien hochzuladen
+      N8N_ORDNER_DATEIEN_URL: ${N8N_ORDNER_DATEIEN_URL:-}
+      N8N_VERSCHIEBE_URL: ${N8N_VERSCHIEBE_URL:-}
       # Drosselung der Ablage - hochsetzen, wenn n8n ins Schwitzen kommt
       N8N_ABLAGE_PAUSE_MS: ${N8N_ABLAGE_PAUSE_MS:-}
       N8N_ABLAGE_VERSUCHE: ${N8N_ABLAGE_VERSUCHE:-}

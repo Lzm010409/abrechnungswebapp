@@ -55,7 +55,19 @@ export function Ablagevorschau({ ergebnis, onAusfuehren, onSchliessen, laedt }: 
               <ul>
                 {eintraege.map((e) => (
                   <li key={e.dateiId} className={e.fehler ? 'fehler' : ''}>
-                    <span title={e.begruendung}>{e.dateiname}</span>
+                    {e.aktion && (
+                      <span
+                        className={`marke aktion ${e.aktion}`}
+                        title={
+                          e.aktion === 'verschieben'
+                            ? `Die Datei liegt schon in OneDrive (${e.abgleich}) und wird nur einsortiert`
+                            : 'In OneDrive nicht gefunden – wird aus sevDesk hochgeladen'
+                        }
+                      >
+                        {e.aktion === 'verschieben' ? 'verschieben' : 'hochladen'}
+                      </span>
+                    )}
+                    <span title={e.begruendung}>{e.quelle?.dateiname ?? e.dateiname}</span>
                     {e.vonHand && <span className="grau klein"> · von Hand</span>}
                     {e.fehler && <span className="klein"> — {e.fehler}</span>}
                   </li>
@@ -72,6 +84,20 @@ export function Ablagevorschau({ ergebnis, onAusfuehren, onSchliessen, laedt }: 
           {ergebnis.ohneBeleg} Buchung{ergebnis.ohneBeleg === 1 ? '' : 'en'} ohne Beleg —
           davon landet nichts in OneDrive.
         </p>
+      )}
+
+      {ergebnis.uebrig && ergebnis.uebrig.length > 0 && (
+        <details className="uebrig">
+          <summary className="grau klein">
+            {ergebnis.uebrig.length} Datei(en) im Monatsordner ohne passende Buchung —
+            bleiben liegen
+          </summary>
+          <ul>
+            {ergebnis.uebrig.map((d) => (
+              <li key={d.id}>{d.dateiname}</li>
+            ))}
+          </ul>
+        </details>
       )}
 
       {fehlgeschlagen.length > 0 && (

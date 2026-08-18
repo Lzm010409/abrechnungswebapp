@@ -1,7 +1,13 @@
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { LadeFortschritt, Monat, Position } from '@abrechnung/shared';
-import { OneDriveAblage, sucheOrdnerId, type AblageOptionen } from './ablage.js';
+import type { AblageEintrag, LadeFortschritt, Monat, Position } from '@abrechnung/shared';
+import {
+  leseDateiliste,
+  ordneZu,
+  OneDriveAblage,
+  sucheOrdnerId,
+  type AblageOptionen,
+} from './ablage.js';
 
 /**
  * Die Belege wandern am Ende in die OneDrive-Monatsordner Konto, Bar und
@@ -430,6 +436,108 @@ describe('Ablegen ueber n8n', () => {
     expect(ergebnis.hinweis).toContain('keinen Ordner');
   });
 
+  it('verschiebt eine vorhandene Datei, statt eine Kopie hochzuladen', async () => {
+    const aufrufe: Array<{ url: string; body: unknown }> = [];
+    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
+      const pfad = String(url);
+      aufrufe.push({ url: pfad, body: JSON.parse(String(init.body)) });
+
+      if (pfad.endsWith('/ordner')) return antwort({ id: 'ORDNER-1' });
+      if (pfad.endsWith('/dateien')) {
+        return antwort([
+          { id: 'od-1', name: 'a.pdf', size: 1 },
+          { id: 'od-2', name: 'Fremd.pdf', size: 99 },
+        ]);
+      }
+      return antwort({ ok: true });
+    });
+
+    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, {
+      pauseMs: 0,
+      ordnerDateienUrl: 'https://n8n.example/dateien',
+      verschiebeUrl: 'https://n8n.example/verschieben',
+    }).lege(monat({ positionen: [pos({ id: 'a' })] }), false);
+
+    expect(ergebnis.eintraege[0]).toMatchObject({
+      aktion: 'verschieben',
+      quelle: { id: 'od-1' },
+    });
+
+    // Verschoben, nicht hochgeladen: kein Aufruf an den Ablage-Webhook.
+    const ziele = aufrufe.map((a) => a.url);
+    expect(ziele).toContain('https://n8n.example/verschieben');
+    expect(ziele).not.toContain('https://n8n.example/ablage');
+    expect(aufrufe.at(-1)!.body).toMatchObject({
+      ordnerId: 'ORDNER-1',
+      unterordner: 'Bar',
+      dateiId: 'od-1',
+    });
+
+    // Was zu keiner Buchung passt, bleibt liegen - und wird gemeldet.
+    expect(ergebnis.uebrig?.map((d) => d.dateiname)).toEqual(['Fremd.pdf']);
+  });
+
+  it('laedt hoch, wenn in OneDrive nichts Passendes liegt', async () => {
+    const ziele: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      const pfad = String(url);
+      ziele.push(pfad);
+      if (pfad.endsWith('/ordner')) return antwort({ id: 'ORDNER-1' });
+      if (pfad.endsWith('/dateien')) return antwort([]);
+      return antwort({ ok: true });
+    });
+
+    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, {
+      pauseMs: 0,
+      ordnerDateienUrl: 'https://n8n.example/dateien',
+      verschiebeUrl: 'https://n8n.example/verschieben',
+    }).lege(monat({ positionen: [pos({ id: 'a' })] }), false);
+
+    expect(ergebnis.eintraege[0]!.aktion).toBe('hochladen');
+    expect(ziele).toContain('https://n8n.example/ablage');
+  });
+
+  it('laedt hoch, wenn sich der Monatsordner nicht auflisten laesst', async () => {
+    // Ein Ausfall des Listen-Workflows darf die Ablage nicht anhalten.
+    const ziele: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      const pfad = String(url);
+      ziele.push(pfad);
+      if (pfad.endsWith('/ordner')) return antwort({ id: 'ORDNER-1' });
+      if (pfad.endsWith('/dateien')) return fehler(500);
+      return antwort({ ok: true });
+    });
+
+    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, {
+      pauseMs: 0,
+      versuche: 1,
+      ordnerDateienUrl: 'https://n8n.example/dateien',
+      verschiebeUrl: 'https://n8n.example/verschieben',
+    }).lege(monat({ positionen: [pos({ id: 'a' })] }), false);
+
+    expect(ergebnis.ausgefuehrt).toBe(true);
+    expect(ergebnis.eintraege[0]!.aktion).toBe('hochladen');
+    expect(ziele).toContain('https://n8n.example/ablage');
+  });
+
+  it('laedt hoch, solange die Verschiebe-Adresse fehlt', async () => {
+    // Nur die Liste ohne das Verschieben waere nutzlos - dann gar nicht erst
+    // auflisten und den Workflow unnoetig belasten.
+    const ziele: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      ziele.push(String(url));
+      return antwort(String(url).endsWith('/ordner') ? { id: 'X' } : { ok: true });
+    });
+
+    await bereit(fetchImpl as unknown as typeof fetch, {
+      pauseMs: 0,
+      ordnerDateienUrl: 'https://n8n.example/dateien',
+    }).lege(monat({ positionen: [pos({ id: 'a' })] }), false);
+
+    expect(ziele).not.toContain('https://n8n.example/dateien');
+    expect(ziele).toContain('https://n8n.example/ablage');
+  });
+
   it('meldet, welche Datei gerade drankommt', async () => {
     const fetchImpl = vi.fn(async (url: string) =>
       antwort(String(url).endsWith('/ordner') ? { ordnerId: 'X' } : { ok: true }),
@@ -489,5 +597,147 @@ describe('sucheOrdnerId', () => {
   it('nimmt keine Wortgruppe fuer eine Kennung', () => {
     expect(sucheOrdnerId({ text: 'kein Ordner gefunden' })).toBeUndefined();
     expect(sucheOrdnerId({})).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('Abgleich mit den Dateien, die schon in OneDrive liegen', () => {
+  /*
+   * Der Kern der Sache: die Belege liegen bereits im Monatsordner und muessen
+   * nur einsortiert werden. Wer stattdessen eine Kopie aus sevDesk hochlaedt,
+   * hat die Datei doppelt - einmal einsortiert, einmal lose daneben.
+   */
+
+  const eintrag = (teil: Partial<AblageEintrag> & { dateiId: string }): AblageEintrag => ({
+    positionId: `p-${teil.dateiId}`,
+    dateiname: `${teil.dateiId}.pdf`,
+    ordner: 'Konto',
+    begruendung: 'Test',
+    ...teil,
+  });
+
+  it('verschiebt, was sich am Dateinamen wiedererkennen laesst', () => {
+    const { zugeordnet, uebrig } = ordneZu(
+      [eintrag({ dateiId: 'a', dateiname: 'Tankquittung.pdf' })],
+      [{ id: 'od-1', dateiname: 'Tankquittung.pdf', groesse: 100 }],
+    );
+
+    expect(zugeordnet[0]).toMatchObject({
+      aktion: 'verschieben',
+      abgleich: 'gleicher Dateiname',
+      quelle: { id: 'od-1' },
+    });
+    expect(uebrig).toHaveLength(0);
+  });
+
+  it('erkennt denselben Beleg auch bei abweichender Schreibweise', () => {
+    const { zugeordnet } = ordneZu(
+      [eintrag({ dateiId: 'a', dateiname: ' Rechnung.PDF ' })],
+      [{ id: 'od-1', dateiname: 'rechnung.pdf' }],
+    );
+
+    expect(zugeordnet[0]!.aktion).toBe('verschieben');
+  });
+
+  it('greift auf die Groesse zurueck, wenn der Name nichts hergibt', () => {
+    // sevDesk-Belege heissen bei uns "beleg-<voucherId>.pdf" - der Name des
+    // Originals in OneDrive ist ein voellig anderer.
+    const { zugeordnet } = ordneZu(
+      [eintrag({ dateiId: 'a', dateiname: 'beleg-4711.pdf', groesse: 8421 })],
+      [{ id: 'od-1', dateiname: 'Scan_20260622.pdf', groesse: 8421 }],
+    );
+
+    expect(zugeordnet[0]).toMatchObject({
+      aktion: 'verschieben',
+      abgleich: 'gleiche Groesse',
+      quelle: { id: 'od-1' },
+    });
+  });
+
+  it('raet nicht, wenn mehrere Dateien dieselbe Groesse haben', () => {
+    const { zugeordnet, uebrig } = ordneZu(
+      [eintrag({ dateiId: 'a', dateiname: 'beleg-4711.pdf', groesse: 8421 })],
+      [
+        { id: 'od-1', dateiname: 'Eins.pdf', groesse: 8421 },
+        { id: 'od-2', dateiname: 'Zwei.pdf', groesse: 8421 },
+      ],
+    );
+
+    // Lieber eine Kopie hochladen als die falsche Datei verschieben.
+    expect(zugeordnet[0]!.aktion).toBe('hochladen');
+    expect(uebrig).toHaveLength(2);
+  });
+
+  it('laesst den Namenstreffer vor dem Groessentreffer laufen', () => {
+    // Sonst schnappt die Groessenzuordnung des ersten Belegs die Datei weg,
+    // die namentlich eindeutig zum zweiten gehoert.
+    const { zugeordnet } = ordneZu(
+      [
+        eintrag({ dateiId: 'a', dateiname: 'beleg-1.pdf', groesse: 500 }),
+        eintrag({ dateiId: 'b', dateiname: 'Miete.pdf', groesse: 500 }),
+      ],
+      [{ id: 'od-1', dateiname: 'Miete.pdf', groesse: 500 }],
+    );
+
+    expect(zugeordnet[1]!.quelle?.id).toBe('od-1');
+    expect(zugeordnet[0]!.aktion).toBe('hochladen');
+  });
+
+  it('vergibt dieselbe Datei nicht zweimal', () => {
+    const { zugeordnet } = ordneZu(
+      [
+        eintrag({ dateiId: 'a', dateiname: 'Doppelt.pdf' }),
+        eintrag({ dateiId: 'b', dateiname: 'Doppelt.pdf' }),
+      ],
+      [{ id: 'od-1', dateiname: 'Doppelt.pdf' }],
+    );
+
+    expect(zugeordnet[0]!.aktion).toBe('verschieben');
+    expect(zugeordnet[1]!.aktion).toBe('hochladen');
+  });
+
+  it('meldet die Dateien, zu denen keine Buchung passt', () => {
+    const { uebrig } = ordneZu(
+      [eintrag({ dateiId: 'a', dateiname: 'Bekannt.pdf' })],
+      [
+        { id: 'od-1', dateiname: 'Bekannt.pdf' },
+        { id: 'od-2', dateiname: 'Wer bin ich.pdf' },
+      ],
+    );
+
+    expect(uebrig.map((d) => d.dateiname)).toEqual(['Wer bin ich.pdf']);
+  });
+
+  it('laedt alles hoch, wenn OneDrive nichts liefert', () => {
+    const { zugeordnet } = ordneZu([eintrag({ dateiId: 'a' })], []);
+    expect(zugeordnet[0]!.aktion).toBe('hochladen');
+  });
+});
+
+describe('leseDateiliste', () => {
+  it('liest Kennung, Name und Groesse aus der OneDrive-Antwort', () => {
+    expect(
+      leseDateiliste([{ id: '01ABC', name: 'Beleg.pdf', size: 4711 }]),
+    ).toEqual([{ id: '01ABC', dateiname: 'Beleg.pdf', groesse: 4711 }]);
+  });
+
+  it('ueberspringt Ordner - die sollen nicht in sich selbst wandern', () => {
+    expect(
+      leseDateiliste([
+        { id: '01ORD', name: 'Konto', folder: { childCount: 3 } },
+        { id: '01DAT', name: 'Beleg.pdf', size: 1 },
+      ]).map((d) => d.id),
+    ).toEqual(['01DAT']);
+  });
+
+  it('kommt ohne Groessenangabe aus', () => {
+    expect(leseDateiliste([{ id: '01ABC', name: 'Beleg.pdf' }])).toEqual([
+      { id: '01ABC', dateiname: 'Beleg.pdf' },
+    ]);
+  });
+
+  it('ignoriert Eintraege ohne Kennung oder Namen', () => {
+    expect(leseDateiliste([{ name: 'ohne Kennung.pdf' }, { id: '01X' }, 'Text'])).toEqual([]);
   });
 });
