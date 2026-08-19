@@ -23,6 +23,7 @@ und die Belegdateien dazu:
 | `extraktionen` | Ergebnisse der KI-Belegextraktion | ja, kostet erneut Modellaufrufe |
 | `reviews` | Ergebnisse der KI-Monatsprüfung | ja |
 | `dateien` | die Belegdateien selbst, als `bytea` | teilweise |
+| `abdruecke` | Fingerabdrücke für den OneDrive-Abgleich | ja, wird bei Bedarf neu berechnet |
 
 Die Belegdateien lagen unter `$DATA_DIR/monate/<YYYY-MM>/<dateiId>`, wo kein
 Coolify-Backup sie erfasste. Gemessen im laufenden Container:
