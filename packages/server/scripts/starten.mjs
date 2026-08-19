@@ -113,7 +113,14 @@ async function uebernimmAltbestand(sql) {
 
   const [erledigt] = await sql`select erledigt_am, bericht from __altbestand where name = 'import'`;
   if (erledigt) {
-    melde(`Altbestand bereits uebernommen am ${erledigt.erledigt_am.toISOString()}.`);
+    // Der Bericht wird bei jedem Start wiederholt. Ein Containerprotokoll
+    // reicht nur bis zum letzten Neustart zurueck - die Zaehlwerte des Umzugs
+    // waeren sonst nach dem ersten Neustart nicht mehr nachlesbar, und genau
+    // sie sind der Nachweis, dass nichts liegengeblieben ist.
+    melde(`Altbestand bereits uebernommen am ${erledigt.erledigt_am.toISOString()}:`);
+    for (const zeile of (erledigt.bericht ?? '').split('\n')) {
+      if (zeile.trim()) melde(`  ${zeile}`);
+    }
     return;
   }
 
