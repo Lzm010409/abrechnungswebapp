@@ -60,7 +60,10 @@ USER node
 
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
+# Grosszuegige Anlaufzeit: beim allerersten Start gegen eine leere Datenbank
+# wendet starten.mjs die Migrationen an und uebernimmt den Altbestand, bevor
+# der Server ueberhaupt lauscht.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "packages/server/scripts/starten.mjs"]
