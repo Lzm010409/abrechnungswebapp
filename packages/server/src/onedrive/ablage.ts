@@ -9,6 +9,9 @@ import type {
   Position,
 } from '@abrechnung/shared';
 import { leseSeitentexte, ordneBuchungenSeitenZu } from '../pdf/seitenzuordnung.js';
+import { berechneAbdruck, type Abdruck } from './abdruck.js';
+import { gleicheAb, type Stufe } from './abgleich.js';
+import { holeAbdruecke, type AbdruckSpeicher } from './inhalte.js';
 import { bestimmeOrdner, istTankbeleg } from './kategorie.js';
 
 /**
@@ -67,6 +70,8 @@ export interface AblageOptionen {
 
 export interface AblageAbhaengigkeiten {
   ladeDatei: (dateiId: string) => Promise<Buffer>;
+  /** Zwischenspeicher der Fingerabdruecke; ohne ihn wird jedes Mal neu gelesen. */
+  abdruckSpeicher?: AbdruckSpeicher;
   log?: { info: (o: unknown, m?: string) => void; warn: (o: unknown, m?: string) => void };
 }
 
@@ -195,7 +200,11 @@ export class OneDriveAblage {
     });
 
     const vorhanden = await this.listeOrdner(ordnerId);
-    const { zugeordnet, uebrig } = ordneZu(einteilung, vorhanden);
+    const { zugeordnet, uebrig, stufen, nichtLesbar } = await this.gleicheOrdnerAb(
+      einteilung,
+      vorhanden,
+      melde,
+    );
 
     melde({
       phase: 'dateien',
@@ -205,6 +214,11 @@ export class OneDriveAblage {
       erledigt: 1,
       gesamt: 1,
     });
+
+    this.deps.log?.info(
+      { monat: monat.monat, gefunden: vorhanden.length, ...stufen },
+      'Abgleich mit dem Monatsordner',
+    );
 
     const erledigt: AblageEintrag[] = [];
     for (const [i, eintrag] of zugeordnet.entries()) {
@@ -262,6 +276,23 @@ export class OneDriveAblage {
       eintraege: erledigt,
       ohneBeleg,
       uebrig,
+      stufen,
+      /*
+       * Ohne den Inhalt der Dateien faellt der Abgleich auf Name und Groesse
+       * zurueck - also genau auf das, was vorher fast nichts gefunden hat. Das
+       * muss dastehen, sonst sieht ein duerftiges Ergebnis aus wie ein
+       * ordentliches.
+       */
+      ...(nichtLesbar > 0
+        ? {
+            hinweis:
+              `${nichtLesbar} von ${vorhanden.length} Dateien im Monatsordner ` +
+              'liessen sich nicht lesen. Für sie entschied nur Name und Größe. ' +
+              (nichtLesbar === vorhanden.length
+                ? 'Kommt der Server nicht an OneDrive heran, taugt der Abgleich nicht.'
+                : ''),
+          }
+        : {}),
     };
   }
 
@@ -275,6 +306,104 @@ export class OneDriveAblage {
    * Ist an der Buchung ein Ordner von Hand gesetzt, gilt dieser. Die Regel ist
    * eine Heuristik; sie soll die Handeinstellung nicht ueberstimmen.
    */
+  /**
+   * Gleicht die Belege inhaltlich mit dem Monatsordner ab.
+   *
+   * Dafuer wird jede Datei einmal gelesen - die aus OneDrive ueber ihre
+   * vorab beglaubigte Adresse, die aus sevDesk aus der eigenen Ablage. Das
+   * dauert bei einem vollen Monat einige Sekunden und ist der Preis dafuer,
+   * dass der Abgleich am Inhalt entscheidet und nicht am Dateinamen.
+   *
+   * Faellt das Lesen aus - kein Netz zu OneDrive, unlesbares PDF -, wird nicht
+   * abgebrochen: der Abgleich laeuft dann mit den Merkmalen weiter, die
+   * vorliegen, und im Zweifel wird hochgeladen statt verschoben.
+   */
+  private async gleicheOrdnerAb(
+    einteilung: AblageEintrag[],
+    vorhanden: OneDriveDatei[],
+    melde: (f: LadeFortschritt) => void,
+  ): Promise<{
+    zugeordnet: AblageEintrag[];
+    uebrig: OneDriveDatei[];
+    stufen: Record<Stufe, number>;
+    nichtLesbar: number;
+  }> {
+    const { abdruecke, ausSpeicher, fehlgeschlagen } = await holeAbdruecke(vorhanden, {
+      fetchImpl: this.doFetch,
+      ...(this.deps.abdruckSpeicher ? { speicher: this.deps.abdruckSpeicher } : {}),
+      ...(this.deps.log ? { log: this.deps.log } : {}),
+      melde: (gelesen, gesamt) =>
+        melde({
+          phase: 'dateien',
+          schritt: 'abgleich',
+          titel: 'Vorhandene Dateien werden abgeglichen',
+          text: `Inhalt wird gelesen: ${gelesen} von ${gesamt}`,
+          erledigt: gelesen,
+          gesamt,
+        }),
+    });
+
+    if (fehlgeschlagen.length > 0) {
+      this.deps.log?.warn(
+        { anzahl: fehlgeschlagen.length, erster: fehlgeschlagen[0]?.fehler },
+        'Nicht alle Dateien im Monatsordner waren lesbar',
+      );
+    }
+    if (ausSpeicher > 0) {
+      this.deps.log?.info({ ausSpeicher }, 'Fingerabdruecke aus dem Zwischenspeicher');
+    }
+
+    // Die eigenen Belege: sie liegen bereits in der Ablage dieser Anwendung.
+    const belege = [];
+    for (const [i, eintrag] of einteilung.entries()) {
+      melde({
+        phase: 'dateien',
+        schritt: 'abgleich',
+        titel: 'Vorhandene Dateien werden abgeglichen',
+        text: `Belege werden gelesen: ${i + 1} von ${einteilung.length}`,
+        erledigt: i + 1,
+        gesamt: einteilung.length,
+      });
+
+      let abdruck: Abdruck | undefined;
+      try {
+        // Die dateiId IST der Inhalts-Hash des Belegs. Ein gemerkter Abdruck
+        // kann deshalb nie veralten - er wird nur einmal je Beleg berechnet.
+        abdruck =
+          (await this.deps.abdruckSpeicher?.hole(
+            `beleg:${eintrag.dateiId}`,
+            eintrag.dateiId,
+          )) ?? undefined;
+
+        if (!abdruck) {
+          abdruck = await berechneAbdruck(await this.deps.ladeDatei(eintrag.dateiId));
+          await this.deps.abdruckSpeicher?.lege(
+            `beleg:${eintrag.dateiId}`,
+            eintrag.dateiId,
+            abdruck,
+          );
+        }
+      } catch (err) {
+        this.deps.log?.warn(
+          { datei: eintrag.dateiname, err: err instanceof Error ? err.message : String(err) },
+          'Beleg nicht lesbar - er geht ohne Fingerabdruck in den Abgleich',
+        );
+      }
+      belege.push({ eintrag, ...(abdruck ? { abdruck } : {}) });
+    }
+
+    return {
+      ...gleicheAb(
+        belege,
+        vorhanden.map((datei) => {
+          const abdruck = abdruecke.get(datei.id);
+          return { datei, ...(abdruck ? { abdruck } : {}) };
+        }),
+      ),
+      nichtLesbar: fehlgeschlagen.length,
+    };
+  }
+
   private async teileEin(monat: Monat): Promise<AblageEintrag[]> {
     const relevant = monat.positionen.filter(
       (p) =>
@@ -299,6 +428,7 @@ export class OneDriveAblage {
           dateiId: datei.id,
           dateiname: datei.dateiname,
           groesse: datei.groesse,
+          betrag: position.betrag,
           ordner,
           begruendung: vonHand
             ? 'an der Buchung von Hand gesetzt'
@@ -505,72 +635,6 @@ function leseRetryAfter(wert: string | null): number | undefined {
 
 // ---------------------------------------------------------------------------
 
-/**
- * Ordnet jedem Beleg die Datei zu, die in OneDrive schon dafuer liegt.
- *
- * Der Sinn: die Belege sind bereits im Monatsordner - sie muessen nur in den
- * richtigen Unterordner. Wer stattdessen eine Kopie aus sevDesk hochlaedt,
- * hat die Datei doppelt und das Original weiterhin lose herumliegen.
- *
- * Zugeordnet wird in zwei Stufen, die staerkere zuerst:
- *
- *  1. gleicher Dateiname - traegt bei allem, was von Hand hochgeladen wurde
- *     oder dessen Name sevDesk unveraendert uebernommen hat
- *  2. gleiche Groesse in Bytes, und zwar eindeutig - denselben Beleg zweimal
- *     mit identischer Bytezahl gibt es praktisch nicht, verschiedene mit
- *     zufaellig gleicher Groesse aber sehr wohl. Bei mehreren Kandidaten wird
- *     deshalb nicht geraten.
- *
- * Was sich nicht zuordnen laesst, wird hochgeladen wie bisher. Was in OneDrive
- * uebrig bleibt, wird gemeldet statt stillschweigend liegen gelassen - dort
- * zeigt sich, wo der Abgleich danebenliegt.
- */
-export function ordneZu(
-  eintraege: AblageEintrag[],
-  vorhanden: OneDriveDatei[],
-): { zugeordnet: AblageEintrag[]; uebrig: OneDriveDatei[] } {
-  const frei = new Map(vorhanden.map((d) => [d.id, d]));
-
-  const nimm = (datei: OneDriveDatei, abgleich: string) => {
-    frei.delete(datei.id);
-    return { aktion: 'verschieben' as const, quelle: datei, abgleich };
-  };
-
-  // Erst alle Namenstreffer, dann die Groessen: sonst koennte eine
-  // Groessenuebereinstimmung eine Datei wegschnappen, die namentlich
-  // eindeutig zu einem spaeteren Beleg gehoert.
-  const zugeordnet: AblageEintrag[] = eintraege.map((e) => ({ ...e }));
-
-  for (const eintrag of zugeordnet) {
-    const treffer = [...frei.values()].find(
-      (d) => normalisiere(d.dateiname) === normalisiere(eintrag.dateiname),
-    );
-    if (treffer) Object.assign(eintrag, nimm(treffer, 'gleicher Dateiname'));
-  }
-
-  for (const eintrag of zugeordnet) {
-    if (eintrag.aktion) continue;
-
-    const kandidaten = [...frei.values()].filter(
-      (d) => d.groesse !== undefined && d.groesse === eintrag.groesse,
-    );
-    if (kandidaten.length === 1) {
-      Object.assign(eintrag, nimm(kandidaten[0]!, 'gleiche Groesse'));
-    }
-  }
-
-  for (const eintrag of zugeordnet) {
-    if (!eintrag.aktion) eintrag.aktion = 'hochladen';
-  }
-
-  return { zugeordnet, uebrig: [...frei.values()] };
-}
-
-/** Gross-/Kleinschreibung und Leerraum sollen den Abgleich nicht verhindern. */
-function normalisiere(name: string): string {
-  return name.trim().toLowerCase();
-}
-
 /** Kurzer Satz fuer die Fortschrittsanzeige. */
 function beschreibeAbgleich(
   zugeordnet: AblageEintrag[],
@@ -590,6 +654,11 @@ function beschreibeAbgleich(
  * Wie ueberall bei n8n: Feldnamen nicht fest verdrahten. Gesucht wird nach
  * Objekten, die eine Kennung und einen Namen tragen; Ordner werden dabei
  * uebersprungen, sie sollen nicht in sich selbst verschoben werden.
+ *
+ * Wichtig fuer den Abgleich sind zwei Felder, die Microsoft Graph von sich aus
+ * mitliefert: `@microsoft.graph.downloadUrl`, unter der sich der Inhalt ohne
+ * weiteres Zutun holen laesst, und `cTag`, der sich mit dem Inhalt aendert und
+ * deshalb den Fingerabdruck-Zwischenspeicher schluessig macht.
  */
 export function leseDateiliste(wert: unknown): OneDriveDatei[] {
   const roh = Array.isArray(wert) ? wert : [wert];
@@ -607,7 +676,21 @@ export function leseDateiliste(wert: unknown): OneDriveDatei[] {
     if (!id || !dateiname) continue;
 
     const groesse = ersteZahl(o, ['size', 'groesse', 'sizeBytes']);
-    dateien.push({ id, dateiname, ...(groesse === undefined ? {} : { groesse }) });
+    const downloadUrl = ersterText(o, [
+      '@microsoft.graph.downloadUrl',
+      '@content.downloadUrl',
+      'downloadUrl',
+      'inhaltUrl',
+    ]);
+    const cTag = ersterText(o, ['cTag', 'ctag', 'eTag', 'etag']);
+
+    dateien.push({
+      id,
+      dateiname,
+      ...(groesse === undefined ? {} : { groesse }),
+      ...(downloadUrl === undefined ? {} : { downloadUrl }),
+      ...(cTag === undefined ? {} : { cTag }),
+    });
   }
 
   return dateien;

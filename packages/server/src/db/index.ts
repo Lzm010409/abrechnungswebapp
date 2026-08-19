@@ -295,6 +295,40 @@ export class Datenbank {
       .where(and(eq(schema.dateien.monat, monat), eq(schema.dateien.dateiId, dateiId)));
   }
 
+  // -- Fingerabdruecke der Belegdateien -------------------------------------
+
+  /**
+   * Der gemerkte Abdruck einer Datei, sofern er noch gilt.
+   *
+   * Stimmt die Marke nicht mehr, hat sich der Inhalt geaendert - dann gilt der
+   * Abdruck nicht mehr und die Datei wird neu gelesen. Ohne Marke wird nichts
+   * herausgegeben: dann laesst sich nicht feststellen, ob er noch stimmt.
+   */
+  async ladeAbdruck<T>(schluessel: string, marke: string | undefined): Promise<T | null> {
+    if (!marke) return null;
+    const [zeile] = await this.db
+      .select({ abdruck: schema.abdruecke.abdruck })
+      .from(schema.abdruecke)
+      .where(and(eq(schema.abdruecke.schluessel, schluessel), eq(schema.abdruecke.marke, marke)))
+      .limit(1);
+    return zeile ? (zeile.abdruck as T) : null;
+  }
+
+  async speichereAbdruck(
+    schluessel: string,
+    marke: string | undefined,
+    abdruck: unknown,
+  ): Promise<void> {
+    if (!marke) return;
+    await this.db
+      .insert(schema.abdruecke)
+      .values({ schluessel, marke, abdruck, erstelltAm: new Date() })
+      .onConflictDoUpdate({
+        target: schema.abdruecke.schluessel,
+        set: { marke, abdruck, erstelltAm: new Date() },
+      });
+  }
+
   async schliesse(): Promise<void> {
     await this.beende?.();
   }

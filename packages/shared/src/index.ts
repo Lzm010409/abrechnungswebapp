@@ -369,8 +369,21 @@ export interface OneDriveDatei {
   /** OneDrive-Kennung, damit sich die Datei verschieben laesst */
   id: string;
   dateiname: string;
-  /** Bytes, sofern der Workflow sie mitliefert - Grundlage des Abgleichs */
+  /** Bytes, sofern der Workflow sie mitliefert */
   groesse?: number;
+  /**
+   * Vorab beglaubigte Adresse, unter der sich der Inhalt holen laesst.
+   *
+   * Microsoft Graph legt sie jeder Dateiantwort bei. Nur mit ihr kann der
+   * Abgleich den Inhalt vergleichen statt Name und Groesse zu raten. Sie ist
+   * kurzlebig und gehoert deshalb nirgends dauerhaft hin.
+   */
+  downloadUrl?: string;
+  /**
+   * Inhaltsmarke von OneDrive. Aendert sich, sobald der Inhalt sich aendert,
+   * und dient deshalb als Schluessel des Fingerabdruck-Zwischenspeichers.
+   */
+  cTag?: string;
 }
 
 /**
@@ -391,8 +404,15 @@ export interface AblageEintrag {
   positionId: string;
   dateiId: string;
   dateiname: string;
-  /** Bytes des Belegs - Grundlage des Abgleichs mit OneDrive */
+  /** Bytes des Belegs */
   groesse?: number;
+  /**
+   * Betrag der zugehoerigen Buchung.
+   *
+   * Letzter Anker des Abgleichs: steht er im Text einer Datei im Monatsordner
+   * und sonst nirgends, gehoert die Datei zu dieser Buchung.
+   */
+  betrag?: number;
   ordner: Ablageordner;
   /** Kurze Begruendung der Einordnung, fuer die Anzeige */
   begruendung: string;
@@ -402,8 +422,10 @@ export interface AblageEintrag {
   aktion?: Ablageaktion;
   /** Die zugeordnete Datei in OneDrive, wenn verschoben wird */
   quelle?: OneDriveDatei;
-  /** Warum die Zuordnung zustande kam ("gleicher Name", "gleiche Groesse") */
+  /** Warum die Zuordnung zustande kam, im Klartext fuer die Anzeige */
   abgleich?: string;
+  /** Welche Stufe des Abgleichs gegriffen hat - siehe onedrive/abgleich.ts */
+  stufe?: string;
   /** Fehlermeldung, wenn die Ablage fehlschlug */
   fehler?: string;
 }
@@ -414,6 +436,14 @@ export interface AblageErgebnis {
   ausgefuehrt: boolean;
   /** Ordner-ID des Monats in OneDrive, sofern ermittelt */
   ordnerId?: string;
+  /**
+   * Wie viele Zuordnungen je Stufe des Abgleichs zustande kamen.
+   *
+   * Steht in der Oberflaeche, weil sonst niemand beurteilen kann, wie
+   * belastbar das Ergebnis ist: zwanzig Treffer ueber den Byte-Vergleich sind
+   * etwas anderes als zwanzig ueber die blosse Dateigroesse.
+   */
+  stufen?: Record<string, number>;
   /**
    * Dateien im Monatsordner, denen sich keine Buchung zuordnen liess.
    *

@@ -430,6 +430,12 @@ export async function registriereRouten(
 
     const ablage = new OneDriveAblage(ctx.ablageOptionen ?? {}, {
       ladeDatei: (dateiId) => ctx.ablage.lese(monat, dateiId),
+      // Die einmal berechneten Fingerabdruecke ueberdauern den Lauf: ein
+      // zweiter Anlauf desselben Monats liest die Dateien nicht noch einmal.
+      abdruckSpeicher: {
+        hole: (itemId, cTag) => ctx.db.ladeAbdruck(itemId, cTag),
+        lege: (itemId, cTag, abdruck) => ctx.db.speichereAbdruck(itemId, cTag, abdruck),
+      },
       log: app.log,
     });
 
