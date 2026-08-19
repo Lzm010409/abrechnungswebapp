@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
@@ -374,15 +374,26 @@ describe('End-to-End: gesamte Programmkette', () => {
       await starteApp();
     });
 
-    /** Loescht die abgelegten Dateien, laesst die Datenbank unberuehrt. */
-    const loescheDateien = () =>
+    /**
+     * Laesst die Belegdateien des Monats verschwinden - in der Datenbank wie
+     * auf der Platte. Beides ist noetig: die Datei liegt seit dem Umzug in der
+     * Datenbank, die Platte traegt nur noch eine Zweitschrift.
+     */
+    const loescheDateien = async () => {
+      const monat = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
+      for (const position of monat.positionen) {
+        for (const datei of [...position.dateien, ...(position.kandidaten ?? [])]) {
+          await db.loescheDatei(MONAT, datei.id);
+        }
+      }
       rmSync(join(dataDir, 'monate', MONAT), { recursive: true, force: true });
+    };
 
     it('holt eine verschwundene Datei beim naechsten Laden neu', async () => {
       const vorher = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
       expect(vorher.positionen[0]!.dateien).toHaveLength(1);
 
-      loescheDateien();
+      await loescheDateien();
 
       const nachher = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
       expect(nachher.positionen[0]!.dateien).toHaveLength(1);
@@ -405,8 +416,7 @@ describe('End-to-End: gesamte Programmkette', () => {
     });
 
     it('sagt deutlich, wenn die Datei weg und nicht wiederbeschaffbar ist', async () => {
-      await app.inject({ url: `/api/months/${MONAT}` });
-      loescheDateien();
+      await loescheDateien();
       // sevDesk liefert den Beleg nicht mehr aus.
       sevdesk.daten.voucherDateien = {};
 
@@ -421,9 +431,10 @@ describe('End-to-End: gesamte Programmkette', () => {
       // statt eines PDF - herunterladbar, aber nicht zu oeffnen.
       const vorher = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();
       const dateiId = vorher.positionen[0]!.dateien[0]!.id;
-      writeFileSync(
-        join(dataDir, 'monate', MONAT, dateiId),
-        (await testPdf(1)).toString('base64'),
+      await db.speichereDatei(
+        MONAT,
+        dateiId,
+        Buffer.from((await testPdf(1)).toString('base64')),
       );
 
       const nachher = (await app.inject({ url: `/api/months/${MONAT}` })).json<Monat>();

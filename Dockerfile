@@ -46,8 +46,9 @@ COPY --from=build /app/packages/web/dist      ./packages/web/dist
 COPY --from=build /app/packages/server/drizzle ./packages/server/drizzle
 COPY --from=build /app/packages/server/scripts ./packages/server/scripts
 
-# Heruntergeladene Belege und hochgeladene Kontoauszuege liegen hier. Der
-# Datenbestand selbst liegt seit der Umstellung in Postgres.
+# Zweitschrift der Belegdateien. Der Bestand selbst - Tabellen und Dateien -
+# liegt seit der Umstellung vollstaendig in Postgres; dieses Verzeichnis haelt
+# nur noch den Rueckweg auf eine aeltere Fassung offen.
 #
 # Bewusst KEIN VOLUME: Docker legt daraus bei jedem neuen Container ein neues
 # anonymes Volume an, das beim naechsten Deploy stillschweigend verwaist - die

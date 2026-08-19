@@ -117,7 +117,7 @@ ausschließlich für die Arbeit auf dem eigenen Rechner gedacht.
 | `ANTHROPIC_API_KEY` | nein | KI-Funktionen inaktiv, Rest läuft vollständig |
 | `ENTRA_ERLAUBTE_BENUTZER` | nein | jedes Konto des Tenants darf sich anmelden |
 | `ENTRA_ERLAUBTE_GRUPPEN` | nein | keine Gruppenprüfung |
-| `DATA_DIR` | nein | `./data` — dort liegen Belegdateien und Kontoauszüge |
+| `DATA_DIR` | nein | `./data` — dort liegt die Zweitschrift der Belegdateien |
 
 Die App meldet ihren tatsächlichen Funktionsumfang über `GET /api/capabilities`;
 das Frontend blendet inaktive Schaltflächen automatisch aus. **Der Anthropic-Key
@@ -587,7 +587,7 @@ Werte stehen in `packages/server/src/ai/client.ts` unter `BUDGET`.
 npm test
 ```
 
-377 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+383 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 
@@ -633,18 +633,16 @@ darauf, und der Container legt das Schema beim Start selbst an. Das Anlegen der
 Coolify-Ressource, das Ausrollen und den einmaligen Umzug des Altbestandes
 beschreibt [DATENBANK-UMSTELLUNG.md](DATENBANK-UMSTELLUNG.md).
 
-`/data` bleibt daneben als Volume eingebunden — dort liegen die
-heruntergeladenen Belege und die hochgeladenen Kontoauszüge. In Coolify
-geschieht das unter *Persistent Storage* (Pfad `/data`); mit `docker compose`
-erledigt es die mitgelieferte `docker-compose.yml`.
+Auch die Belegdateien liegen in der Datenbank (`bytea`, gemessene 38 MB) —
+ein `pg_dump` ist damit der vollständige Sicherungspunkt. `/data` trägt nur noch
+eine Zweitschrift: die Anwendung schreibt weiterhin dorthin und liest von dort,
+was in der Datenbank fehlt. Das ist allein der Rückweg auf eine ältere Fassung
+und wird in einem späteren Schritt ausgebaut.
 
-Fehlt die Einbindung, liegen diese Dateien in der Schreibschicht des Containers
-und sind beim nächsten Deploy weg. Sichtbar wird das erst später und an der
-falschen Stelle — als Beleg, der sich nicht mehr anzeigen lässt. Der Server
-warnt deshalb beim Start, wenn `/data` nicht eingebunden ist, und holt fehlende
-Belegdateien beim nächsten Laden des Monats automatisch aus sevDesk neu. Die
-hochgeladenen Kontoauszüge kommen so allerdings nicht zurück: für sie greift
-weiterhin **kein Coolify-Backup**.
+`/data` sollte trotzdem als Volume eingebunden bleiben, solange dieser Rückweg
+gebraucht wird. In Coolify geschieht das unter *Persistent Storage* (Pfad
+`/data`); mit `docker compose` erledigt es die mitgelieferte
+`docker-compose.yml`. Der Server warnt beim Start, wenn die Einbindung fehlt.
 
 **Vor dem nächsten Deploy** müssen die Entra-Variablen gesetzt sein
 (`ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`,

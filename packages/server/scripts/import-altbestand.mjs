@@ -15,7 +15,7 @@
  *   node packages/server/scripts/import-altbestand.mjs
  *   node packages/server/scripts/import-altbestand.mjs --datei /data/abrechnung.sqlite
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import postgres from 'postgres';
@@ -35,7 +35,10 @@ const DATA_DIR = resolve(argument('--data-dir') ?? process.env.DATA_DIR ?? './da
 const SQLITE = resolve(argument('--datei') ?? join(DATA_DIR, 'abrechnung.sqlite'));
 
 /** Die Tabellen in der Reihenfolge, in der sie uebertragen werden. */
-const TABELLEN = ['monate', 'overrides', 'kontoauszuege', 'extraktionen', 'reviews'];
+const TABELLEN = ['monate', 'overrides', 'kontoauszuege', 'extraktionen', 'reviews', 'dateien'];
+
+/** Belegdateien unterhalb dieses Verzeichnisses, nach Monat sortiert. */
+const MONATSORDNER = /^\d{4}-\d{2}$/;
 
 function melde(text) {
   console.log(`[import] ${text}`);
@@ -233,7 +236,48 @@ async function main() {
       }
     }
 
-    zeigeStand(`Gefunden in ${SQLITE}:`, gelesen);
+    // -- dateien ------------------------------------------------------------
+    /*
+     * Die Belegdateien lagen unter $DATA_DIR/monate/<YYYY-MM>/<dateiId>. Sie
+     * wandern mit in die Datenbank, damit ein pg_dump der vollstaendige
+     * Sicherungspunkt ist. Auf der Platte bleiben sie unangetastet - der
+     * Rueckweg soll offen bleiben.
+     */
+    const monatsWurzel = join(DATA_DIR, 'monate');
+    gelesen.dateien = 0;
+    if (existsSync(monatsWurzel)) {
+      for (const monatsOrdner of readdirSync(monatsWurzel).sort()) {
+        if (!MONATSORDNER.test(monatsOrdner)) {
+          warnungen.push(`dateien: "${monatsOrdner}" ist kein Monatsordner, uebersprungen`);
+          continue;
+        }
+        const verzeichnis = join(monatsWurzel, monatsOrdner);
+        for (const name of readdirSync(verzeichnis).sort()) {
+          const pfad = join(verzeichnis, name);
+          if (!statSync(pfad).isFile()) continue;
+          gelesen.dateien++;
+          if (trockenlauf) continue;
+
+          const inhalt = readFileSync(pfad);
+          if (ueberschreiben) {
+            await sql`insert into dateien (monat, datei_id, inhalt, groesse)
+                      values (${monatsOrdner}, ${name}, ${inhalt}, ${inhalt.byteLength})
+                      on conflict (monat, datei_id) do update
+                         set inhalt = excluded.inhalt,
+                             groesse = excluded.groesse,
+                             gespeichert_am = now()`;
+          } else {
+            await sql`insert into dateien (monat, datei_id, inhalt, groesse)
+                      values (${monatsOrdner}, ${name}, ${inhalt}, ${inhalt.byteLength})
+                      on conflict (monat, datei_id) do nothing`;
+          }
+        }
+      }
+    } else {
+      melde(`Kein Verzeichnis ${monatsWurzel} - keine Belegdateien zu uebertragen.`);
+    }
+
+    zeigeStand(`Gefunden in ${SQLITE} bzw. ${DATA_DIR}/monate:`, gelesen);
 
     const nachher = await zaehle(sql);
     zeigeStand('Bestand in Postgres nach dem Import:', nachher);

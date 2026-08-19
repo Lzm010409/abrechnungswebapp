@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, ne, sql } from 'drizzle-orm';
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
 import type { Kontoauszug, Monat, Position } from '@abrechnung/shared';
 import * as schema from './schema.js';
@@ -230,6 +230,69 @@ export class Datenbank {
         target: schema.reviews.monat,
         set: { daten, erstelltAm: new Date() },
       });
+  }
+
+  // -- Belegdateien ---------------------------------------------------------
+
+  async ladeDatei(monat: string, dateiId: string): Promise<Buffer | null> {
+    const [zeile] = await this.db
+      .select({ inhalt: schema.dateien.inhalt })
+      .from(schema.dateien)
+      .where(and(eq(schema.dateien.monat, monat), eq(schema.dateien.dateiId, dateiId)))
+      .limit(1);
+    return zeile ? zeile.inhalt : null;
+  }
+
+  /**
+   * Die ersten Bytes einer Datei.
+   *
+   * Fuer die Unversehrtheitspruefung genuegt die Signatur am Anfang. Ein Beleg
+   * kann mehrere Megabyte gross sein - ihn dafuer vollstaendig zu holen waere
+   * beim Laden eines Monats mit vielen Belegen spuerbar.
+   */
+  async dateiKopf(monat: string, dateiId: string, bytes = 12): Promise<Buffer | null> {
+    const [zeile] = await this.db
+      .select({
+        kopf: sql<Buffer>`substring(${schema.dateien.inhalt} from 1 for ${bytes})`,
+      })
+      .from(schema.dateien)
+      .where(and(eq(schema.dateien.monat, monat), eq(schema.dateien.dateiId, dateiId)))
+      .limit(1);
+    if (!zeile?.kopf) return null;
+    return Buffer.isBuffer(zeile.kopf) ? zeile.kopf : Buffer.from(zeile.kopf);
+  }
+
+  async dateiVorhanden(monat: string, dateiId: string): Promise<boolean> {
+    const [zeile] = await this.db
+      .select({ eins: sql<number>`1` })
+      .from(schema.dateien)
+      .where(and(eq(schema.dateien.monat, monat), eq(schema.dateien.dateiId, dateiId)))
+      .limit(1);
+    return zeile !== undefined;
+  }
+
+  async speichereDatei(monat: string, dateiId: string, inhalt: Buffer): Promise<void> {
+    await this.db
+      .insert(schema.dateien)
+      .values({ monat, dateiId, inhalt, groesse: inhalt.byteLength, gespeichertAm: new Date() })
+      /*
+       * Die ID ist der Inhalts-Hash, eine vorhandene Zeile sollte also
+       * denselben Inhalt tragen. Weicht die Groesse ab, tut sie es nicht - etwa
+       * weil frueher einmal base64-Text statt eines PDF abgelegt wurde. Nur
+       * dann wird geschrieben; sonst bliebe bei jedem Abruf eine tote Zeile in
+       * der Tabelle zurueck.
+       */
+      .onConflictDoUpdate({
+        target: [schema.dateien.monat, schema.dateien.dateiId],
+        set: { inhalt, groesse: inhalt.byteLength, gespeichertAm: new Date() },
+        setWhere: ne(schema.dateien.groesse, inhalt.byteLength),
+      });
+  }
+
+  async loescheDatei(monat: string, dateiId: string): Promise<void> {
+    await this.db
+      .delete(schema.dateien)
+      .where(and(eq(schema.dateien.monat, monat), eq(schema.dateien.dateiId, dateiId)));
   }
 
   async schliesse(): Promise<void> {

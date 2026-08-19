@@ -1,20 +1,34 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, open, readFile, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import type { BelegDatei, BelegQuelle } from '@abrechnung/shared';
+import type { Datenbank } from '../db/index.js';
 import { erkenneSignatur } from '../sevdesk/client.js';
 
 /**
- * Dateiablage fuer heruntergeladene Belege, hochgeladene Kontoauszuege und
- * erzeugte Abrechnungs-PDFs.
+ * Dateiablage fuer heruntergeladene Belege und hochgeladene Kontoauszuege.
+ *
+ * Die Dateien liegen in der Datenbank. Vorher lagen sie unter
+ * `$DATA_DIR/monate/<YYYY-MM>/<dateiId>`, wo kein Backup sie erfasste; bei
+ * gemessenen 38 MB Gesamtbestand ist ein `pg_dump` jetzt der vollstaendige
+ * Sicherungspunkt.
+ *
+ * Der Weg auf die Platte bleibt daneben bestehen, und zwar in beide
+ * Richtungen: gelesen wird von dort, was in der Datenbank (noch) fehlt, und
+ * geschrieben wird weiterhin auch dorthin. Damit findet eine zurueckgerollte
+ * Fassung ihren Bestand unveraendert vor. Der Ausbau ist ein spaeterer,
+ * eigener Schritt.
  *
  * Ablage nach Monat, damit ein Monat als Ganzes verworfen und neu geladen
  * werden kann, ohne andere Monate anzufassen.
  */
 export class Dateiablage {
-  constructor(private readonly wurzel: string) {}
+  constructor(
+    private readonly wurzel: string,
+    private readonly db: Datenbank,
+  ) {}
 
   private monatsPfad(monat: string): string {
     // monat ist immer "YYYY-MM" (durch istGueltigerMonat geprueft), damit ist
@@ -51,17 +65,8 @@ export class Dateiablage {
     const endung = dateiname.includes('.') ? dateiname.slice(dateiname.lastIndexOf('.')) : '.pdf';
     const id = `${hash}${endung}`;
 
-    const basis = this.monatsPfad(monat);
-    await mkdir(basis, { recursive: true });
-    const pfad = await this.pfadFuer(monat, id);
-
-    // Die ID ist der Inhalts-Hash, eine vorhandene Datei sollte also identisch
-    // sein. Weicht die Groesse ab, ist sie es nicht - etwa nach einem
-    // abgebrochenen Schreibvorgang oder weil frueher der falsche Inhalt
-    // abgelegt wurde. Dann neu schreiben statt der alten Fassung zu vertrauen.
-    if (!existsSync(pfad) || (await stat(pfad)).size !== daten.byteLength) {
-      await writeFile(pfad, daten);
-    }
+    await this.db.speichereDatei(monat, id, daten);
+    await this.legeAufPlatteAb(monat, id, daten);
 
     return {
       id,
@@ -73,11 +78,36 @@ export class Dateiablage {
     };
   }
 
+  /**
+   * Zweitschrift auf der Platte.
+   *
+   * Sie wird nicht mehr gelesen, solange die Datenbank die Datei kennt. Sie
+   * bleibt, damit ein Rueckrollen auf die vorige Fassung den Bestand
+   * vollstaendig vorfindet. Schlaegt das Schreiben fehl - kein eingebundenes
+   * Verzeichnis, volle Platte -, ist das kein Grund, den Abruf scheitern zu
+   * lassen: die Datei liegt bereits in der Datenbank.
+   */
+  private async legeAufPlatteAb(monat: string, id: string, daten: Buffer): Promise<void> {
+    try {
+      await mkdir(this.monatsPfad(monat), { recursive: true });
+      const pfad = await this.pfadFuer(monat, id);
+      if (!existsSync(pfad) || (await stat(pfad)).size !== daten.byteLength) {
+        await writeFile(pfad, daten);
+      }
+    } catch {
+      // Bewusst still: die Datenbank ist die Wahrheit.
+    }
+  }
+
   async lese(monat: string, dateiId: string): Promise<Buffer> {
+    const ausDerDatenbank = await this.db.ladeDatei(monat, dateiId);
+    if (ausDerDatenbank) return ausDerDatenbank;
+    // Noch nicht uebertragen - dann von der Platte.
     return readFile(await this.pfadFuer(monat, dateiId));
   }
 
   async existiert(monat: string, dateiId: string): Promise<boolean> {
+    if (await this.db.dateiVorhanden(monat, dateiId)) return true;
     return existsSync(await this.pfadFuer(monat, dateiId));
   }
 
@@ -85,7 +115,7 @@ export class Dateiablage {
    * Prueft, ob unter der ID tatsaechlich das steht, was der Name verspricht.
    *
    * Anlass: sevDesk hat Belege schon als blanken base64-Text geliefert, der
-   * ungeprueft als "…​.pdf" auf der Platte landete. Herunterladen liess er sich,
+   * ungeprueft als "…​.pdf" abgelegt wurde. Herunterladen liess er sich,
    * oeffnen nicht. Solche Dateien sollen beim naechsten Laden ersetzt werden,
    * ohne dass jemand von Hand nachhelfen muss.
    *
@@ -93,26 +123,27 @@ export class Dateiablage {
    * nichts Nennenswertes.
    */
   async istUnversehrt(monat: string, datei: BelegDatei): Promise<boolean> {
-    let griff;
-    try {
-      griff = await open(await this.pfadFuer(monat, datei.id), 'r');
-      const puffer = Buffer.alloc(12);
-      const { bytesRead } = await griff.read(puffer, 0, 12, 0);
-      if (bytesRead < 4) return false;
+    const kopf = (await this.db.dateiKopf(monat, datei.id)) ?? (await this.kopfVonPlatte(monat, datei.id));
+    if (!kopf || kopf.byteLength < 4) return false;
 
-      // Irgendein bekanntes Dateiformat genuegt. Die Endung taugt als Massstab
-      // nicht: ein Beleg, den sevDesk als Bild liefert, bekommt trotzdem den
-      // Namen "beleg-123.pdf" - er waere dauerhaft als kaputt gegolten und bei
-      // jedem Laden erneut geholt worden.
-      return erkenneSignatur(puffer.subarray(0, bytesRead)) !== undefined;
+    // Irgendein bekanntes Dateiformat genuegt. Die Endung taugt als Massstab
+    // nicht: ein Beleg, den sevDesk als Bild liefert, bekommt trotzdem den
+    // Namen "beleg-123.pdf" - er waere dauerhaft als kaputt gegolten und bei
+    // jedem Laden erneut geholt worden.
+    return erkenneSignatur(kopf) !== undefined;
+  }
+
+  private async kopfVonPlatte(monat: string, dateiId: string): Promise<Buffer | null> {
+    try {
+      const inhalt = await readFile(await this.pfadFuer(monat, dateiId));
+      return inhalt.subarray(0, 12);
     } catch {
-      return false;
-    } finally {
-      await griff?.close();
+      return null;
     }
   }
 
   async loesche(monat: string, dateiId: string): Promise<void> {
+    await this.db.loescheDatei(monat, dateiId);
     const pfad = await this.pfadFuer(monat, dateiId);
     if (existsSync(pfad)) await unlink(pfad);
   }

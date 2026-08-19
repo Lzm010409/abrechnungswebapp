@@ -1,4 +1,13 @@
-import { index, integer, jsonb, pgTable, primaryKey, text, timestamp } from 'drizzle-orm/pg-core';
+import {
+  customType,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  primaryKey,
+  text,
+  timestamp,
+} from 'drizzle-orm/pg-core';
 
 /**
  * Das Schema der Abrechnung in Postgres.
@@ -76,3 +85,44 @@ export const reviews = pgTable('reviews', {
   daten: jsonb().notNull(),
   erstelltAm: timestamp({ withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Rohbytes einer Datei.
+ *
+ * Drizzle kennt `bytea` nicht von sich aus. Die Treiber liefern die Spalte je
+ * nach Bauart als `Buffer` oder als `Uint8Array` - der Rest der Anwendung
+ * rechnet mit `Buffer`, deshalb wird hier einmal vereinheitlicht.
+ */
+const bytea = customType<{ data: Buffer; driverData: Buffer | Uint8Array }>({
+  dataType() {
+    return 'bytea';
+  },
+  fromDriver(wert) {
+    return Buffer.isBuffer(wert) ? wert : Buffer.from(wert);
+  },
+});
+
+/**
+ * Die Belegdateien selbst: heruntergeladene Belege und hochgeladene
+ * Kontoauszuege.
+ *
+ * Sie lagen frueher als Dateien unter `$DATA_DIR/monate/<YYYY-MM>/<dateiId>`.
+ * Dort waren sie von keinem Backup erfasst, weil Coolify Volumes nicht sichert.
+ * Bei gemessenen 38 MB Gesamtbestand wiegt das leichter als jede Ersparnis:
+ * seit sie hier liegen, ist ein `pg_dump` der vollstaendige Sicherungspunkt.
+ *
+ * `dateiId` ist der Inhalts-Hash. Zusammen mit dem Monat ergibt er den
+ * Schluessel - derselbe Beleg in zwei Monaten wird zweimal abgelegt, so wie es
+ * die Dateiablage auch tat.
+ */
+export const dateien = pgTable(
+  'dateien',
+  {
+    monat: text().notNull(),
+    dateiId: text().notNull(),
+    inhalt: bytea().notNull(),
+    groesse: integer().notNull(),
+    gespeichertAm: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.monat, t.dateiId] })],
+);

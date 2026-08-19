@@ -63,8 +63,8 @@ services:
       ANTHROPIC_EFFORT: ${ANTHROPIC_EFFORT:-high}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
-      # Nur noch Belegdateien und Kontoauszuege - der Datenbestand liegt in der
-      # Datenbank.
+      # Nur noch die Zweitschrift der Belegdateien - der Bestand liegt
+      # vollstaendig in der Datenbank.
       - abrechnung-daten:/data
 
 volumes:

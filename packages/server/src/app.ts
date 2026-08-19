@@ -190,7 +190,7 @@ export async function baueApp(
   await warneVorFluechtigemDatenverzeichnis(app, config.dataDir);
 
   const db = vorgaben.db ?? verbinde(config.datenbankUrl);
-  const ablage = new Dateiablage(config.dataDir);
+  const ablage = new Dateiablage(config.dataDir, db);
 
   const rechnungen = new StandardRechnungsProvider(
     sevdesk,

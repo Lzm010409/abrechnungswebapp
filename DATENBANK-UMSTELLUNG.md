@@ -12,7 +12,8 @@ selbst passiert.
 
 ## Was umzieht und was nicht
 
-**In die Datenbank wandern** die fünf Tabellen der bisherigen SQLite-Datei:
+**In die Datenbank wandern** die fünf Tabellen der bisherigen SQLite-Datei —
+und die Belegdateien dazu:
 
 | Tabelle | Inhalt | Ersetzbar? |
 |---|---|---|
@@ -21,26 +22,27 @@ selbst passiert.
 | `kontoauszuege` | Verzeichnis der hochgeladenen Auszüge | nein |
 | `extraktionen` | Ergebnisse der KI-Belegextraktion | ja, kostet erneut Modellaufrufe |
 | `reviews` | Ergebnisse der KI-Monatsprüfung | ja |
+| `dateien` | die Belegdateien selbst, als `bytea` | teilweise |
 
-**Nicht in die Datenbank wandern** die Dateien unter `$DATA_DIR/monate/`. Sie
-bleiben auf dem Volume, und für sie greift weiterhin **kein Coolify-Backup**.
+Die Belegdateien lagen unter `$DATA_DIR/monate/<YYYY-MM>/<dateiId>`, wo kein
+Coolify-Backup sie erfasste. Gemessen im laufenden Container:
 
-Der Grund für diese Trennung steht im Code: fehlende Belegdateien holt die
-Anwendung beim nächsten Laden eines Monats selbst wieder aus sevDesk
-(`stelleDateienSicher` in `packages/server/src/monatsdienst.ts`). Erzeugte
-Abrechnungs-PDFs werden gar nicht erst abgelegt, sondern direkt ausgeliefert.
-Unwiederbringlich in diesem Verzeichnis sind allein die **vom Nutzer
-hochgeladenen Kontoauszüge** — deren Verzeichniseintrag liegt jetzt zwar in der
-Datenbank, die PDF-Datei selbst aber weiter auf dem Volume.
+```
+$ du -sh /data/monate
+38M     /data/monate
+```
 
-> **Offen:** Ob die Dateien mit in die Datenbank gehören (`bytea`), hängt an
-> ihrer Größe. Die Messung im laufenden Container steht noch aus:
-> ```
-> du -sh /data/monate
-> ```
-> Unter etwa 500 MB wäre der Schritt sinnvoll — dann wäre ein `pg_dump` der
-> vollständige Sicherungspunkt. Er gehört in einen eigenen Pull Request, nicht
-> in diesen.
+38 MB wiegen leichter als jede Ersparnis. Seit sie in der Tabelle `dateien`
+liegen, ist ein `pg_dump` der **vollständige** Sicherungspunkt — es bleibt
+nichts außerhalb.
+
+**Auf der Platte bleiben sie trotzdem.** Die Anwendung schreibt weiterhin eine
+Zweitschrift dorthin und liest von dort, was in der Datenbank (noch) fehlt.
+Das ist der Rückweg: eine zurückgerollte Fassung findet ihren Bestand
+unverändert vor. Der Ausbau dieses zweiten Pfades ist ein späterer, eigener
+Schritt.
+
+`$DATA_DIR` wird also weiterhin gebraucht — nur hängt jetzt nichts mehr daran.
 
 ---
 
@@ -73,7 +75,7 @@ An der Anwendung in Coolify:
 | `DATABASE_URL` | die Zeichenkette aus Schritt 1 |
 
 Alle übrigen Variablen bleiben unverändert. `DATA_DIR` wird weiterhin gebraucht
-— dort liegen die Belegdateien.
+— dort liegt die Zweitschrift der Belegdateien.
 
 Ohne `DATABASE_URL` startet der Server nicht und sagt das beim Start deutlich.
 
@@ -95,7 +97,8 @@ Im Log ist der erfolgreiche Start hieran zu erkennen:
 
 ```
 [start] Migration 0000_special_paper_doll.sql …
-[start] Schema aktuell (1 Migration).
+[start] Migration 0001_skinny_micromax.sql …
+[start] Schema aktuell (2 Migrationen).
 [start] Server wird gestartet.
 ```
 
@@ -122,7 +125,8 @@ node packages/server/scripts/import-altbestand.mjs
 
 Der Importer:
 
-- liest `$DATA_DIR/abrechnung.sqlite` (oder `--datei <pfad>`)
+- liest `$DATA_DIR/abrechnung.sqlite` (oder `--datei <pfad>`) und die Dateien
+  unter `$DATA_DIR/monate/<YYYY-MM>/`
 - ist **wiederholbar**: bereits vorhandene Zeilen bleiben unangetastet, ein
   zweiter Lauf verdoppelt nichts und überschreibt nichts
 - meldet unbrauchbare Zeitstempel und ungültiges JSON, statt sie zu verschlucken
@@ -130,7 +134,8 @@ Der Importer:
   Ausnahmefall und will begründet sein
 
 Danach die Anwendung im Browser öffnen und stichprobenartig prüfen: ein Monat
-mit manuellen Korrekturen, ein Monat mit hochgeladenen Kontoauszügen.
+mit manuellen Korrekturen, ein Monat mit hochgeladenen Kontoauszügen, und einen
+Beleg tatsächlich öffnen.
 
 ## 5. Kontrolle
 
@@ -142,7 +147,15 @@ psql -U abrechnung -d abrechnung -c "
   union all select 'overrides', count(*) from overrides
   union all select 'kontoauszuege', count(*) from kontoauszuege
   union all select 'extraktionen', count(*) from extraktionen
-  union all select 'reviews', count(*) from reviews;"
+  union all select 'reviews', count(*) from reviews
+  union all select 'dateien', count(*) from dateien;"
+```
+
+Und die Größe der Belegtabelle, zum Vergleich mit den gemessenen 38 MB:
+
+```sh
+psql -U abrechnung -d abrechnung -c \
+  "select pg_size_pretty(pg_total_relation_size('dateien'));"
 ```
 
 Die Zahlen müssen zu denen aus Schritt 4 passen.
@@ -158,14 +171,17 @@ Geht bei der Umstellung etwas schief:
 1. In Coolify auf das vorige Deployment zurückrollen.
 2. `DATABASE_URL` kann gesetzt bleiben — die alte Fassung liest sie nicht.
 3. Die SQLite-Datei liegt unverändert unter `$DATA_DIR/abrechnung.sqlite`.
+4. Die Belegdateien liegen unverändert unter `$DATA_DIR/monate/` — die neue
+   Fassung hat sie kopiert, nicht verschoben, und schreibt neue Dateien
+   weiterhin auch dorthin.
 
 Es gehen dabei nur die Änderungen verloren, die zwischen Umstellung und
 Rückrollen in der Anwendung entstanden sind. Deshalb: den Import zeitnah nach
 dem Deploy machen und danach prüfen.
 
 Erst wenn der Betrieb über einige Wochen unauffällig läuft, werden in einem
-eigenen Pull Request `packages/server/src/db/sqlite.ts`, `better-sqlite3` und
-der Importer entfernt.
+eigenen Pull Request `packages/server/src/db/sqlite.ts`, `better-sqlite3`, der
+Importer und die Zweitschrift auf der Platte entfernt.
 
 ---
 
