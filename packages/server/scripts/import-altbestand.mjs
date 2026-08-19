@@ -1,48 +1,43 @@
 /**
- * Uebertraegt den Altbestand aus der SQLite-Datei nach Postgres.
+ * Uebertraegt den Altbestand aus der SQLite-Datei und der Dateiablage nach
+ * Postgres.
  *
- * Laeuft ausdruecklich NICHT beim Start des Containers: der Umzug des
- * Bestandes ist ein Vorgang, den ein Mensch anstoesst und dessen Zaehlwerte
- * ein Mensch liest.
- *
- * Wiederholbar: vorhandene Zeilen bleiben unangetastet. Damit kann der
- * Import gefahrlos ein zweites Mal laufen, ohne die Arbeit zu ueberschreiben,
- * die inzwischen in der Anwendung entstanden ist. Wer das ausdruecklich will,
+ * Wiederholbar: vorhandene Zeilen bleiben unangetastet. Damit kann der Import
+ * gefahrlos ein zweites Mal laufen, ohne die Arbeit zu ueberschreiben, die
+ * inzwischen in der Anwendung entstanden ist. Wer das ausdruecklich will,
  * setzt `--ueberschreiben`.
  *
- * Aufruf:
+ * Der Altbestand wird gelesen, nicht bewegt: die SQLite-Datei und die Dateien
+ * unter `monate/` bleiben liegen. Das ist der Rueckweg.
+ *
+ * Aufruf von Hand:
  *   node packages/server/scripts/import-altbestand.mjs --trockenlauf
  *   node packages/server/scripts/import-altbestand.mjs
  *   node packages/server/scripts/import-altbestand.mjs --datei /data/abrechnung.sqlite
+ *
+ * `scripts/starten.mjs` ruft `importiere()` beim ersten Start gegen eine noch
+ * unbefuellte Datenbank ebenfalls auf - siehe dort.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
 
 const require = createRequire(import.meta.url);
 
-const argumente = process.argv.slice(2);
-const trockenlauf = argumente.includes('--trockenlauf');
-const ueberschreiben = argumente.includes('--ueberschreiben');
-
-function argument(name) {
-  const i = argumente.indexOf(name);
-  return i >= 0 ? argumente[i + 1] : undefined;
-}
-
-const DATA_DIR = resolve(argument('--data-dir') ?? process.env.DATA_DIR ?? './data');
-const SQLITE = resolve(argument('--datei') ?? join(DATA_DIR, 'abrechnung.sqlite'));
-
 /** Die Tabellen in der Reihenfolge, in der sie uebertragen werden. */
-const TABELLEN = ['monate', 'overrides', 'kontoauszuege', 'extraktionen', 'reviews', 'dateien'];
+export const TABELLEN = [
+  'monate',
+  'overrides',
+  'kontoauszuege',
+  'extraktionen',
+  'reviews',
+  'dateien',
+];
 
 /** Belegdateien unterhalb dieses Verzeichnisses, nach Monat sortiert. */
 const MONATSORDNER = /^\d{4}-\d{2}$/;
-
-function melde(text) {
-  console.log(`[import] ${text}`);
-}
 
 /**
  * Deutet einen Zeitstempel aus dem Altbestand.
@@ -69,7 +64,7 @@ function json(wert, was, warnungen) {
   }
 }
 
-async function zaehle(sql) {
+export async function zaehle(sql) {
   const stand = {};
   for (const tabelle of TABELLEN) {
     const [zeile] = await sql.unsafe(`select count(*)::int as anzahl from ${tabelle}`);
@@ -78,43 +73,33 @@ async function zaehle(sql) {
   return stand;
 }
 
-function zeigeStand(titel, stand) {
-  melde(titel);
-  for (const tabelle of TABELLEN) {
-    console.log(`         ${tabelle.padEnd(14)} ${String(stand[tabelle]).padStart(6)}`);
-  }
+function zeileZuStand(stand) {
+  return TABELLEN.map((t) => `${t}=${stand[t]}`).join(' ');
 }
 
-async function main() {
-  const url = process.env.DATABASE_URL;
-  if (!url) {
-    console.error('[import] DATABASE_URL fehlt.');
-    process.exit(1);
-  }
-  if (!existsSync(SQLITE)) {
-    console.error(`[import] Keine SQLite-Datei unter ${SQLITE}.`);
-    console.error('[import] Gibt es keinen Altbestand, ist nichts zu tun.');
-    process.exit(1);
-  }
-
-  // Erst hier laden: ohne Altbestand wird das native Modul nicht gebraucht.
+/**
+ * Uebertraegt den Altbestand.
+ *
+ * Gibt einen Bericht zurueck, damit der Aufrufer die Zaehlwerte protokollieren
+ * kann - beim Aufruf von Hand auf der Konsole, beim Start des Containers im
+ * Deployment-Protokoll.
+ */
+export async function importiere({
+  sql,
+  dataDir,
+  sqlitePfad,
+  trockenlauf = false,
+  ueberschreiben = false,
+  melde = () => {},
+}) {
   const Database = require('better-sqlite3');
-  const alt = new Database(SQLITE, { readonly: true });
-  const sql = postgres(url, { max: 2, onnotice: () => {} });
+  const alt = new Database(sqlitePfad, { readonly: true });
   const warnungen = [];
+  const gelesen = {};
 
   try {
     const vorher = await zaehle(sql);
-    zeigeStand('Bestand in Postgres vor dem Import:', vorher);
-
-    if (trockenlauf) {
-      melde('Trockenlauf — es wird nichts geschrieben.');
-    }
-    if (ueberschreiben && !trockenlauf) {
-      melde('ACHTUNG: --ueberschreiben ist gesetzt, vorhandene Zeilen werden ersetzt.');
-    }
-
-    const gelesen = {};
+    melde(`vorher:  ${zeileZuStand(vorher)}`);
 
     // -- monate -------------------------------------------------------------
     const monate = alt.prepare('SELECT monat, daten, synchronisiertAm FROM monate').all();
@@ -243,7 +228,7 @@ async function main() {
      * Sicherungspunkt ist. Auf der Platte bleiben sie unangetastet - der
      * Rueckweg soll offen bleiben.
      */
-    const monatsWurzel = join(DATA_DIR, 'monate');
+    const monatsWurzel = join(dataDir, 'monate');
     gelesen.dateien = 0;
     if (existsSync(monatsWurzel)) {
       for (const monatsOrdner of readdirSync(monatsWurzel).sort()) {
@@ -274,39 +259,82 @@ async function main() {
         }
       }
     } else {
-      melde(`Kein Verzeichnis ${monatsWurzel} - keine Belegdateien zu uebertragen.`);
+      warnungen.push(`Kein Verzeichnis ${monatsWurzel} - keine Belegdateien zu uebertragen.`);
     }
 
-    zeigeStand(`Gefunden in ${SQLITE} bzw. ${DATA_DIR}/monate:`, gelesen);
-
     const nachher = await zaehle(sql);
-    zeigeStand('Bestand in Postgres nach dem Import:', nachher);
+    melde(`gefunden: ${zeileZuStand(gelesen)}`);
+    melde(`nachher: ${zeileZuStand(nachher)}`);
 
-    for (const tabelle of TABELLEN) {
-      if (trockenlauf || ueberschreiben) break;
-      const dazu = nachher[tabelle] - vorher[tabelle];
-      const vorhandenGeblieben = gelesen[tabelle] - dazu;
-      if (vorhandenGeblieben > 0) {
-        melde(
-          `${tabelle}: ${dazu} neu, ${vorhandenGeblieben} waren bereits vorhanden ` +
-            'und blieben unveraendert.',
-        );
+    if (!trockenlauf && !ueberschreiben) {
+      for (const tabelle of TABELLEN) {
+        const dazu = nachher[tabelle] - vorher[tabelle];
+        const schonDa = gelesen[tabelle] - dazu;
+        if (schonDa > 0) {
+          melde(`${tabelle}: ${dazu} neu, ${schonDa} waren bereits vorhanden und blieben unveraendert.`);
+        }
       }
     }
 
-    if (warnungen.length > 0) {
-      melde(`${warnungen.length} Hinweis(e):`);
-      for (const w of warnungen) console.log(`         ${w}`);
-    }
+    for (const w of warnungen) melde(`Hinweis: ${w}`);
 
-    melde(trockenlauf ? 'Trockenlauf beendet.' : 'Import beendet.');
+    return { vorher, gelesen, nachher, warnungen };
   } finally {
     alt.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Aufruf von Hand
+// ---------------------------------------------------------------------------
+
+async function main() {
+  const argumente = process.argv.slice(2);
+  const argument = (name) => {
+    const i = argumente.indexOf(name);
+    return i >= 0 ? argumente[i + 1] : undefined;
+  };
+
+  const trockenlauf = argumente.includes('--trockenlauf');
+  const ueberschreiben = argumente.includes('--ueberschreiben');
+  const dataDir = resolve(argument('--data-dir') ?? process.env.DATA_DIR ?? './data');
+  const sqlitePfad = resolve(argument('--datei') ?? join(dataDir, 'abrechnung.sqlite'));
+
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    console.error('[import] DATABASE_URL fehlt.');
+    process.exit(1);
+  }
+  if (!existsSync(sqlitePfad)) {
+    console.error(`[import] Keine SQLite-Datei unter ${sqlitePfad}.`);
+    console.error('[import] Gibt es keinen Altbestand, ist nichts zu tun.');
+    process.exit(1);
+  }
+
+  if (trockenlauf) console.log('[import] Trockenlauf — es wird nichts geschrieben.');
+  if (ueberschreiben && !trockenlauf) {
+    console.log('[import] ACHTUNG: --ueberschreiben ersetzt vorhandene Zeilen.');
+  }
+
+  const sql = postgres(url, { max: 2, onnotice: () => {} });
+  try {
+    await importiere({
+      sql,
+      dataDir,
+      sqlitePfad,
+      trockenlauf,
+      ueberschreiben,
+      melde: (text) => console.log(`[import] ${text}`),
+    });
+    console.log(`[import] ${trockenlauf ? 'Trockenlauf' : 'Import'} beendet.`);
+  } finally {
     await sql.end({ timeout: 5 });
   }
 }
 
-main().catch((fehler) => {
-  console.error('[import] Fehlgeschlagen:', fehler);
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((fehler) => {
+    console.error('[import] Fehlgeschlagen:', fehler);
+    process.exit(1);
+  });
+}

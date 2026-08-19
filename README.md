@@ -629,7 +629,9 @@ docker compose up -d --build
 ```
 
 Der Bestand liegt in einer eigenen Postgres-Datenbank; `DATABASE_URL` zeigt
-darauf, und der Container legt das Schema beim Start selbst an. Das Anlegen der
+darauf. Der Container legt das Schema beim Start selbst an und übernimmt beim
+ersten Mal den Altbestand aus der früheren SQLite-Datei — einmalig, mit
+Buchführung in `__altbestand`. Das Anlegen der
 Coolify-Ressource, das Ausrollen und den einmaligen Umzug des Altbestandes
 beschreibt [DATENBANK-UMSTELLUNG.md](DATENBANK-UMSTELLUNG.md).
 

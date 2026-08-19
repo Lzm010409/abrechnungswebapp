@@ -2,7 +2,8 @@
  * Startvorgang des Containers.
  *
  *   1. Datenbankschema anlegen bzw. fortschreiben
- *   2. Den Fastify-Server starten
+ *   2. Den Altbestand einmalig uebernehmen, falls das noch aussteht
+ *   3. Den Fastify-Server starten
  *
  * Bewusst reines JavaScript ohne Werkzeugkette: im Laufzeit-Abbild liegt nur
  * die uebersetzte Ausgabe. Verwendet wird ausschliesslich `postgres`, das die
@@ -17,8 +18,10 @@
  */
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import postgres from 'postgres';
+import { importiere } from './import-altbestand.mjs';
 
 const MIGRATIONEN = fileURLToPath(new URL('../drizzle', import.meta.url));
 const SERVER = new URL('../dist/index.js', import.meta.url);
@@ -81,6 +84,62 @@ async function wendeMigrationenAn(sql) {
   melde(`Schema aktuell (${dateien.length} Migration${dateien.length === 1 ? '' : 'en'}).`);
 }
 
+/**
+ * Uebernimmt den Altbestand aus SQLite und der Dateiablage - genau einmal.
+ *
+ * Die Anwendung laeuft in einem Container ohne Konsole; ein Umzug „von Hand"
+ * hiesse hier, ihn gar nicht machen zu koennen. Deshalb erledigt ihn der Start,
+ * aber mit Buchfuehrung: eine Zeile in `__altbestand` haelt fest, dass es
+ * durch ist. Danach laeuft nichts mehr an - auch nicht bei jedem Neustart.
+ *
+ * Schlaegt der Uebertrag mittendrin fehl, bleibt die Zeile aus und der
+ * naechste Start versucht es erneut. Das ist unbedenklich: der Import laesst
+ * vorhandene Zeilen unangetastet, verdoppelt also nichts.
+ *
+ * Der Altbestand wird gelesen, nicht bewegt. SQLite-Datei und Dateiablage
+ * bleiben liegen - das ist der Rueckweg auf die vorige Fassung.
+ */
+async function uebernimmAltbestand(sql) {
+  const dataDir = resolve(process.env.DATA_DIR ?? './data');
+  const sqlitePfad = join(dataDir, 'abrechnung.sqlite');
+
+  await sql`
+    create table if not exists __altbestand (
+      name text primary key,
+      erledigt_am timestamptz not null default now(),
+      bericht text
+    )
+  `;
+
+  const [erledigt] = await sql`select erledigt_am, bericht from __altbestand where name = 'import'`;
+  if (erledigt) {
+    melde(`Altbestand bereits uebernommen am ${erledigt.erledigt_am.toISOString()}.`);
+    return;
+  }
+
+  if (!existsSync(sqlitePfad)) {
+    melde(`Kein Altbestand unter ${sqlitePfad} — nichts zu uebernehmen.`);
+    // Bewusst keine Zeile schreiben: taucht das Verzeichnis spaeter doch auf
+    // (falsch eingebundenes Volume), soll der naechste Start ihn noch finden.
+    return;
+  }
+
+  melde(`Altbestand aus ${sqlitePfad} wird uebernommen …`);
+  const zeilen = [];
+  const bericht = await importiere({
+    sql,
+    dataDir,
+    sqlitePfad,
+    melde: (text) => {
+      zeilen.push(text);
+      melde(`  ${text}`);
+    },
+  });
+
+  await sql`insert into __altbestand (name, bericht) values ('import', ${zeilen.join('\n')})`;
+  melde(`Altbestand uebernommen (${bericht.warnungen.length} Hinweis(e)).`);
+}
+
 async function main() {
   const url = process.env.DATABASE_URL;
   if (!url) {
@@ -91,6 +150,7 @@ async function main() {
   const sql = postgres(url, { max: 2, onnotice: () => {} });
   try {
     await wendeMigrationenAn(sql);
+    await uebernimmAltbestand(sql);
   } catch (fehler) {
     console.error('[start] Einrichtung fehlgeschlagen:', fehler);
     process.exit(1);

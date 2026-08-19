@@ -86,7 +86,8 @@ Deploy des Branches. Beim Start des Containers läuft
 
 1. legt die Tabelle `__migrationen` an, falls sie fehlt
 2. wendet alle noch nicht angewandten Dateien aus `packages/server/drizzle/` an
-3. startet den Server
+3. übernimmt einmalig den Altbestand, falls das noch aussteht (Schritt 4)
+4. startet den Server
 
 Der Vorgang ist wiederholbar. Ein zweiter Start überspringt, was schon
 angewandt ist, und meldet nur `Schema aktuell (N Migrationen).`. Wurde eine
@@ -102,24 +103,37 @@ Im Log ist der erfolgreiche Start hieran zu erkennen:
 [start] Server wird gestartet.
 ```
 
-Danach ist die Anwendung benutzbar — mit **leerem** Bestand. Die alte
-SQLite-Datei ist unangetastet.
-
 ## 4. Altbestand übertragen
 
-Der Import läuft **nicht** von selbst. Er wird im laufenden Container von Hand
-angestoßen (Coolify: *Terminal* an der Anwendung).
+Der Umzug erledigt sich beim **ersten** Start gegen die neue Datenbank — der
+Container hat keine Konsole, „von Hand" hieße hier: gar nicht.
 
-Erst ansehen, ohne zu schreiben:
+Buch geführt wird darüber in der Tabelle `__altbestand`: ist die Zeile `import`
+gesetzt, läuft nichts mehr an, auch bei keinem Neustart. Schlägt der Übertrag
+mittendrin fehl, bleibt die Zeile aus und der nächste Start versucht es erneut
+— unbedenklich, weil vorhandene Zeilen unangetastet bleiben.
+
+Im Deployment-Protokoll sieht das so aus:
+
+```
+[start] Altbestand aus /data/abrechnung.sqlite wird uebernommen …
+[start]   vorher:  monate=0 overrides=0 kontoauszuege=0 extraktionen=0 reviews=0 dateien=0
+[start]   gefunden: monate=8 overrides=41 kontoauszuege=6 extraktionen=57 reviews=3 dateien=214
+[start]   nachher: monate=8 overrides=41 kontoauszuege=6 extraktionen=57 reviews=3 dateien=214
+[start] Altbestand uebernommen (0 Hinweis(e)).
+```
+
+**Die drei Zeilen müssen zusammenpassen**: was gefunden wurde, muss nachher
+drin sein. Weicht etwas ab, steht der Grund als `Hinweis:` darunter.
+
+Steht dort stattdessen `Kein Altbestand unter …`, ist das Volume nicht
+eingebunden — dann **nicht** weitermachen, sondern erst `/data` prüfen.
+
+Von Hand geht es weiterhin auch, etwa für einen Blick vorab oder für einen
+zweiten Durchgang nach einem Rückrollen:
 
 ```sh
 node packages/server/scripts/import-altbestand.mjs --trockenlauf
-```
-
-Die Ausgabe nennt für jede Tabelle den Bestand vorher, was in der SQLite-Datei
-gefunden wurde, und den Bestand nachher. Stimmen die Zahlen, dann echt:
-
-```sh
 node packages/server/scripts/import-altbestand.mjs
 ```
 
