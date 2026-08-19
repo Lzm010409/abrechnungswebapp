@@ -237,7 +237,7 @@ export async function registriereRouten(
       for (let m = von; m <= bis && monate.length < 60; m = naechsterMonat(m)) {
         monate.push(m);
       }
-      return monate.map((m) => ctx.monate.status(m));
+      return Promise.all(monate.map((m) => ctx.monate.status(m)));
     },
   );
 
@@ -328,7 +328,7 @@ export async function registriereRouten(
       const position = aktuell.positionen.find((p) => p.id === req.params.positionId);
       const bestehende = position?.dateien ?? [];
 
-      ctx.db.speichereOverride(monat, req.params.positionId, {
+      await ctx.db.speichereOverride(monat, req.params.positionId, {
         dateien: [...bestehende, abgelegt],
       });
 
@@ -363,7 +363,7 @@ export async function registriereRouten(
         seiten: abgelegt.seiten,
         hochgeladenAm: new Date().toISOString(),
       };
-      ctx.db.speichereKontoauszug(monat, auszug);
+      await ctx.db.speichereKontoauszug(monat, auszug);
 
       return ctx.monate.lade(monat);
     },
@@ -373,7 +373,7 @@ export async function registriereRouten(
     '/api/months/:monat/statements/:id',
     async (req) => {
       const monat = pruefeMonat(req.params.monat);
-      ctx.db.loescheKontoauszug(monat, req.params.id);
+      await ctx.db.loescheKontoauszug(monat, req.params.id);
       await ctx.ablage.loesche(monat, req.params.id).catch(() => undefined);
       return ctx.monate.lade(monat);
     },
@@ -383,7 +383,7 @@ export async function registriereRouten(
     '/api/months/:monat/statements/order',
     async (req) => {
       const monat = pruefeMonat(req.params.monat);
-      ctx.db.ordneKontoauszuege(monat, req.body.ids);
+      await ctx.db.ordneKontoauszuege(monat, req.body.ids);
       return ctx.monate.lade(monat);
     },
   );
@@ -495,9 +495,9 @@ export async function registriereRouten(
     const zuLesen = daten.positionen.filter(
       (p) => p.dateien[0]?.mimeType.includes('pdf'),
     );
-    const schonGelesen = zuLesen.filter((p) =>
-      ctx.db.ladeExtraktion(p.dateien[0]!.id),
-    ).length;
+    const schonGelesen = (
+      await Promise.all(zuLesen.map((p) => ctx.db.ladeExtraktion(p.dateien[0]!.id)))
+    ).filter(Boolean).length;
 
     melde({
       phase: 'ki-belege',
@@ -525,18 +525,18 @@ export async function registriereRouten(
 
       // Der Cache haengt am Inhalts-Hash: dieselbe Datei wird nie zweimal
       // an das Modell geschickt.
-      let extraktion = ctx.db.ladeExtraktion<
+      let extraktion = await ctx.db.ladeExtraktion<
         NonNullable<(typeof position)['extraktion']>
       >(datei.id);
 
       if (!extraktion) {
         const bytes = await ctx.ablage.lese(monat, datei.id);
         extraktion = await ki.extrahiereBeleg(bytes, datei.dateiname);
-        ctx.db.speichereExtraktion(datei.id, extraktion);
+        await ctx.db.speichereExtraktion(datei.id, extraktion);
         neu++;
       }
 
-      ctx.db.speichereOverride(monat, position.id, { extraktion });
+      await ctx.db.speichereOverride(monat, position.id, { extraktion });
 
       melde({
         phase: 'ki-belege',
@@ -590,14 +590,16 @@ export async function registriereRouten(
     const offen = daten.positionen.filter(
       (p) => p.status === 'offen' && p.dateien.length === 0,
     );
-    const freieBelege = [
-      ...daten.verwaisteBelege,
-      ...daten.positionen.flatMap((p) => p.kandidaten ?? []),
-    ].map((b) => ({
-      id: b.id,
-      dateiname: b.dateiname,
-      extraktion: ctx.db.ladeExtraktion<never>(b.id) ?? undefined,
-    }));
+    const freieBelege = await Promise.all(
+      [
+        ...daten.verwaisteBelege,
+        ...daten.positionen.flatMap((p) => p.kandidaten ?? []),
+      ].map(async (b) => ({
+        id: b.id,
+        dateiname: b.dateiname,
+        extraktion: (await ctx.db.ladeExtraktion<never>(b.id)) ?? undefined,
+      })),
+    );
 
     return { vorschlaege: await ki.schlageZuordnungVor(offen, freieBelege) };
   });
@@ -633,7 +635,7 @@ export async function registriereRouten(
     const daten = await ctx.monate.lade(monat);
 
     const review = await ki.pruefeMonat(monat, daten.positionen);
-    ctx.db.speichereReview(monat, review);
+    await ctx.db.speichereReview(monat, review);
     return review;
   });
 
@@ -696,7 +698,7 @@ export async function registriereRouten(
               : `${review.auffaelligkeiten.length} Auffälligkeit(en)`,
         });
 
-        ctx.db.speichereReview(monat, review);
+        await ctx.db.speichereReview(monat, review);
         return review;
         },
       );
@@ -707,7 +709,7 @@ export async function registriereRouten(
 
   app.get<{ Params: { monat: string } }>('/api/months/:monat/ai/review', async (req) => {
     const monat = pruefeMonat(req.params.monat);
-    return ctx.db.ladeReview(monat) ?? { zusammenfassung: null, auffaelligkeiten: [] };
+    return (await ctx.db.ladeReview(monat)) ?? { zusammenfassung: null, auffaelligkeiten: [] };
   });
 
   // -------------------------------------------------------------------------

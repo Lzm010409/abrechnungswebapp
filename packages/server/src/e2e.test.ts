@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { PDFDocument } from 'pdf-lib';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type {
@@ -15,6 +15,7 @@ import type {
 import { baueApp } from './app.js';
 import type { Config } from './config.js';
 import type { Datenbank } from './db/index.js';
+import { bereiteTestDatenbankVor, legeTestDatenbankAn } from './testhilfen/datenbank.js';
 import {
   starteMockN8n,
   starteMockSevDesk,
@@ -84,6 +85,10 @@ function basisDaten(): MockDaten {
 }
 
 describe('End-to-End: gesamte Programmkette', () => {
+  // Der Aufbau der eingebetteten Datenbank dauert einige Sekunden und gehoert
+  // deshalb nicht in die Zeitvorgabe des ersten Tests.
+  beforeAll(bereiteTestDatenbankVor, 60_000);
+
   let sevdesk: MockSevDesk;
   let n8n: MockN8n;
   let app: FastifyInstance;
@@ -115,6 +120,9 @@ describe('End-to-End: gesamte Programmkette', () => {
       port: 0,
       logLevel: 'silent',
       dataDir,
+      // Die Adresse bleibt ungenutzt: der Test haengt unten eine eingebettete
+      // Postgres ein, statt eine echte vorauszusetzen.
+      datenbankUrl: 'postgres://test/test',
       sevdesk: { token: 'test-token', baseUrl: sevdesk.url },
       n8n: { findRechnungUrl: n8n.url },
       // Die Fachlogik wird ohne Anmeldung geprueft; die Anmeldung selbst hat
@@ -122,7 +130,7 @@ describe('End-to-End: gesamte Programmkette', () => {
       auth: { deaktiviert: true, sicher: false, sessionDauer: 3600 },
       ...ueberschreibungen,
     };
-    const instanz = await baueApp(config);
+    const instanz = await baueApp(config, { db: await legeTestDatenbankAn() });
     app = instanz.app;
     db = instanz.db;
   };
@@ -134,7 +142,7 @@ describe('End-to-End: gesamte Programmkette', () => {
 
   afterEach(async () => {
     await app?.close();
-    db?.schliesse();
+    await db?.schliesse();
     await sevdesk?.schliesse();
     await n8n?.schliesse();
     rmSync(dataDir, { recursive: true, force: true });
@@ -854,7 +862,7 @@ describe('End-to-End: gesamte Programmkette', () => {
     it('schreibt den Zwischenstand nicht in den Cache', async () => {
       // Sonst waere nach einem Abbruch ein Monat ohne Belege gespeichert.
       await app.inject({ url: `/api/months/${MONAT}/stream` });
-      const gespeichert = db.ladeMonat(MONAT)!;
+      const gespeichert = (await db.ladeMonat(MONAT))!;
       expect(gespeichert.positionen[0]!.dateien).toHaveLength(1);
     });
 

@@ -84,9 +84,13 @@ Erst danach greift die KI (falls aktiv) mit weiteren Vorschlägen.
 
 ```bash
 npm install
-cp .env.example .env      # SEVDESK_API_TOKEN und ENTRA_* eintragen
+cp .env.example .env      # DATABASE_URL, SEVDESK_API_TOKEN und ENTRA_* eintragen
+DB_PASSWORD=geheim docker compose up -d datenbank   # oder eine eigene Postgres
 npm run dev               # Backend :3000, Frontend :5173
 ```
+
+Der Bestand liegt in einer eigenen Postgres-Datenbank. Das Schema legt der
+Server beim Start selbst an; siehe [DATENBANK-UMSTELLUNG.md](DATENBANK-UMSTELLUNG.md).
 
 Lokal ohne Entra-Registrierung: `AUTH_MODE=disabled` in der `.env`. Das ist
 ausschließlich für die Arbeit auf dem eigenen Rechner gedacht.
@@ -95,6 +99,7 @@ ausschließlich für die Arbeit auf dem eigenen Rechner gedacht.
 
 | Variable | Pflicht | Wirkung wenn nicht gesetzt |
 |---|---|---|
+| `DATABASE_URL` | ja | Server startet nicht |
 | `SEVDESK_API_TOKEN` | ja | Server startet nicht |
 | `ENTRA_TENANT_ID` | ja | Server startet nicht |
 | `ENTRA_CLIENT_ID` | ja | Server startet nicht |
@@ -112,6 +117,7 @@ ausschließlich für die Arbeit auf dem eigenen Rechner gedacht.
 | `ANTHROPIC_API_KEY` | nein | KI-Funktionen inaktiv, Rest läuft vollständig |
 | `ENTRA_ERLAUBTE_BENUTZER` | nein | jedes Konto des Tenants darf sich anmelden |
 | `ENTRA_ERLAUBTE_GRUPPEN` | nein | keine Gruppenprüfung |
+| `DATA_DIR` | nein | `./data` — dort liegen Belegdateien und Kontoauszüge |
 
 Die App meldet ihren tatsächlichen Funktionsumfang über `GET /api/capabilities`;
 das Frontend blendet inaktive Schaltflächen automatisch aus. **Der Anthropic-Key
@@ -581,14 +587,14 @@ Werte stehen in `packages/server/src/ai/client.ts` unter `BUDGET`.
 npm test
 ```
 
-307 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+377 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 
 ```
 HTTP-Route → MonatsDienst → sevDesk-Client → Mock-sevDesk
                           → RechnungsProvider → Mock-n8n
-                          → Dateiablage → SQLite → PDF
+                          → Dateiablage → Postgres → PDF
 ```
 
 Abgedeckt sind unter anderem: Bankkonto-Ermittlung samt Mehrdeutigkeit,
@@ -609,6 +615,11 @@ verifiziert werden Modell, adaptives Thinking, das Fehlen der entfernten
 Sampling-Parameter, `output_config` mit JSON-Schema und der PDF-Dokumentblock.
 Ein echter API-Aufruf findet dabei nicht statt.
 
+Für die Datenbank braucht es **keinen laufenden Server**: die Tests starten eine
+eingebettete Postgres im Prozess (`testhilfen/datenbank.ts`). Geprüft wird damit
+echtes Postgres-SQL, nicht ein Nachbau — insbesondere, dass die manuellen
+Korrekturen ein Verwerfen des Monatscaches überleben.
+
 ---
 
 ## Deployment
@@ -617,16 +628,23 @@ Ein echter API-Aufruf findet dabei nicht statt.
 docker compose up -d --build
 ```
 
-`/data` **muss** als Volume eingebunden werden — dort liegen SQLite-Datenbank,
-Belegcache und erzeugte PDFs. In Coolify geschieht das unter *Persistent
-Storage* (Pfad `/data`); mit `docker compose` erledigt es die mitgelieferte
-`docker-compose.yml`.
+Der Bestand liegt in einer eigenen Postgres-Datenbank; `DATABASE_URL` zeigt
+darauf, und der Container legt das Schema beim Start selbst an. Das Anlegen der
+Coolify-Ressource, das Ausrollen und den einmaligen Umzug des Altbestandes
+beschreibt [DATENBANK-UMSTELLUNG.md](DATENBANK-UMSTELLUNG.md).
 
-Fehlt die Einbindung, liegen die Daten in der Schreibschicht des Containers und
-sind beim nächsten Deploy weg. Sichtbar wird das erst später und an der falschen
-Stelle — als Beleg, der sich nicht mehr anzeigen lässt. Der Server warnt
-deshalb beim Start, wenn `/data` nicht eingebunden ist, und holt fehlende
-Belegdateien beim nächsten Laden des Monats automatisch neu.
+`/data` bleibt daneben als Volume eingebunden — dort liegen die
+heruntergeladenen Belege und die hochgeladenen Kontoauszüge. In Coolify
+geschieht das unter *Persistent Storage* (Pfad `/data`); mit `docker compose`
+erledigt es die mitgelieferte `docker-compose.yml`.
+
+Fehlt die Einbindung, liegen diese Dateien in der Schreibschicht des Containers
+und sind beim nächsten Deploy weg. Sichtbar wird das erst später und an der
+falschen Stelle — als Beleg, der sich nicht mehr anzeigen lässt. Der Server
+warnt deshalb beim Start, wenn `/data` nicht eingebunden ist, und holt fehlende
+Belegdateien beim nächsten Laden des Monats automatisch aus sevDesk neu. Die
+hochgeladenen Kontoauszüge kommen so allerdings nicht zurück: für sie greift
+weiterhin **kein Coolify-Backup**.
 
 **Vor dem nächsten Deploy** müssen die Entra-Variablen gesetzt sein
 (`ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`,

@@ -1,10 +1,32 @@
 services:
+  # Nur fuer den Betrieb mit docker compose. In Coolify ist die Datenbank eine
+  # eigene Standalone-Ressource - nur so sichert Coolify sie mit.
+  datenbank:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: abrechnung
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD fehlt}
+      POSTGRES_DB: abrechnung
+    volumes:
+      - abrechnung-datenbank:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U abrechnung']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   abrechnung:
     build: .
     restart: unless-stopped
+    depends_on:
+      datenbank:
+        condition: service_healthy
     ports:
       - '3000:3000'
     environment:
+      # Pflicht - der gesamte Bestand liegt hier
+      DATABASE_URL: postgres://abrechnung:${DB_PASSWORD:?DB_PASSWORD fehlt}@datenbank:5432/abrechnung
       # Pflicht
       SEVDESK_API_TOKEN: ${SEVDESK_API_TOKEN:?SEVDESK_API_TOKEN fehlt}
       # Pflicht - Anmeldung ueber Microsoft Entra ID
@@ -41,7 +63,10 @@ services:
       ANTHROPIC_EFFORT: ${ANTHROPIC_EFFORT:-high}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
+      # Nur noch Belegdateien und Kontoauszuege - der Datenbestand liegt in der
+      # Datenbank.
       - abrechnung-daten:/data
 
 volumes:
   abrechnung-daten:
+  abrechnung-datenbank:

@@ -8,7 +8,8 @@ import { KiDienst } from './ai/client.js';
 import { EntraAnmeldung } from './auth/entra.js';
 import { registriereAuth } from './auth/plugin.js';
 import type { Config } from './config.js';
-import { Datenbank } from './db/index.js';
+import type { Datenbank } from './db/index.js';
+import { verbinde } from './db/verbindung.js';
 import { StandardRechnungsProvider } from './invoices/provider.js';
 import { MonatsDienst } from './monatsdienst.js';
 import { registriereRouten } from './routes/index.js';
@@ -21,13 +22,24 @@ export interface AppInstanz {
   db: Datenbank;
 }
 
+export interface AppVorgaben {
+  /**
+   * Fertige Datenbank statt einer eigenen Verbindung.
+   *
+   * Nur fuer Tests gedacht: sie haengen dort eine eingebettete Postgres ein,
+   * statt einen Server vorauszusetzen.
+   */
+  db?: Datenbank;
+}
+
 /**
  * Warnt, wenn das Datenverzeichnis im Container nicht eingebunden ist.
  *
- * Ohne Einbindung liegen Datenbank und Belege in der Schreibschicht des
- * Containers und sind beim naechsten Deploy verschwunden. Das faellt sonst
- * erst auf, wenn ein Beleg nicht mehr angezeigt werden kann - also spaet und
- * an der falschen Stelle.
+ * Ohne Einbindung liegen die Belegdateien in der Schreibschicht des Containers
+ * und sind beim naechsten Deploy verschwunden. Das faellt sonst erst auf, wenn
+ * ein Beleg nicht mehr angezeigt werden kann - also spaet und an der falschen
+ * Stelle. Sie werden zwar bei Bedarf aus sevDesk nachgeholt, die hochgeladenen
+ * Kontoauszuege dagegen nicht.
  */
 async function warneVorFluechtigemDatenverzeichnis(
   app: FastifyInstance,
@@ -45,9 +57,11 @@ async function warneVorFluechtigemDatenverzeichnis(
     if (!eingebunden) {
       app.log.warn(
         { dataDir },
-        `${dataDir} ist nicht eingebunden - Datenbank und heruntergeladene Belege ` +
-          'gehen beim naechsten Deploy verloren. In Coolify unter "Persistent Storage" ' +
-          'ein Volume auf diesen Pfad legen.',
+        `${dataDir} ist nicht eingebunden - die heruntergeladenen Belege und ` +
+          'Kontoauszuege gehen beim naechsten Deploy verloren. In Coolify unter ' +
+          '"Persistent Storage" ein Volume auf diesen Pfad legen. Der ' +
+          'Datenbestand selbst liegt seit der Umstellung in Postgres und ist ' +
+          'davon nicht betroffen.',
       );
     }
   } catch {
@@ -83,7 +97,10 @@ export function entferneGeheimnisse(url: string): string {
  * Integrationstests dieselbe Instanz per app.inject() ansprechen koennen wie
  * der echte Betrieb - ohne Port und ohne Abweichung im Aufbau.
  */
-export async function baueApp(config: Config): Promise<AppInstanz> {
+export async function baueApp(
+  config: Config,
+  vorgaben: AppVorgaben = {},
+): Promise<AppInstanz> {
   const app = Fastify({
     logger: {
       level: config.logLevel,
@@ -172,7 +189,7 @@ export async function baueApp(config: Config): Promise<AppInstanz> {
 
   await warneVorFluechtigemDatenverzeichnis(app, config.dataDir);
 
-  const db = new Datenbank(config.dataDir);
+  const db = vorgaben.db ?? verbinde(config.datenbankUrl);
   const ablage = new Dateiablage(config.dataDir);
 
   const rechnungen = new StandardRechnungsProvider(
