@@ -7,7 +7,7 @@ import type { Abdruck } from './abdruck.js';
  * Vorher entschieden Dateiname und Byte-Groesse. Beides trifft hier praktisch
  * nie: sevDesk nennt jeden Beleg "beleg-<voucherId>.pdf", in OneDrive steht der
  * Name des Lieferanten, und gleiche Groessen wiederholen sich - in einem
- * gepruefen Monatsordner lagen fuenf verschiedene Rechnungen mit exakt 95370
+ * gepruefen Monatsordner lagen vier verschiedene Rechnungen mit exakt 95370
  * Bytes. Von 67 Dateien wurde deshalb genau eine zugeordnet.
  *
  * Jetzt entscheidet der Inhalt, in mehreren Stufen von hart nach weich. Jede

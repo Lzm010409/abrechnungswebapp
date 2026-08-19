@@ -132,7 +132,7 @@ describe('gleicheAb', () => {
   });
 
   it('raet nicht bei mehrfach vorkommender Groesse', async () => {
-    // Der Grund fuer den Umbau: in einem echten Monatsordner lagen fuenf
+    // Der Grund fuer den Umbau: in einem echten Monatsordner lagen vier
     // verschiedene Rechnungen mit exakt 95370 Bytes.
     const { zugeordnet, uebrig } = gleicheAb(
       [beleg('a', { groesse: 95370 })],

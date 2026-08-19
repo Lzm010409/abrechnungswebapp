@@ -9,7 +9,7 @@ import { leseSeitentexte } from '../pdf/seitenzuordnung.js';
  * er nur Dateiname und Byte-Groesse kannte. Beides taugt nicht: sevDesk nennt
  * jeden Beleg "beleg-<voucherId>.pdf", waehrend in OneDrive der Name des
  * Lieferanten steht, und Groessen wiederholen sich (in einem gepruefen
- * Monatsordner lagen fuenf verschiedene Rechnungen mit exakt 95370 Bytes).
+ * Monatsordner lagen vier verschiedene Rechnungen mit exakt 95370 Bytes).
  *
  * Deshalb wird jede Datei einmal vollstaendig gelesen und in mehrere
  * unabhaengige Merkmale zerlegt. Sie sind bewusst verschieden empfindlich:

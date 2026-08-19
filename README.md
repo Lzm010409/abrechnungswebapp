@@ -319,7 +319,7 @@ fällt auf Name und Größe zurück.
 
 Name und Größe genügen nicht. sevDesk nennt jeden Beleg `beleg-<voucherId>.pdf`,
 während in OneDrive der Name des Lieferanten steht — und Größen wiederholen
-sich: in einem geprüften Monatsordner lagen fünf verschiedene Rechnungen mit
+sich: in einem geprüften Monatsordner lagen vier verschiedene Rechnungen mit
 exakt 95 370 Bytes. Von 67 Dateien wurde deshalb genau eine zugeordnet.
 
 Deshalb wird jede Datei **einmal vollständig gelesen** — die aus OneDrive über
