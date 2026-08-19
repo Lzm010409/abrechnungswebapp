@@ -27,6 +27,35 @@ interface Props {
   laedt: boolean;
 }
 
+/**
+ * Woran die Zuordnungen hingen, in einem Satz.
+ *
+ * Die Stufen sind absteigend belastbar: ein Byte-Vergleich ist ein Beweis,
+ * eine uebereinstimmende Dateigroesse ein Indiz. Wer das nicht sieht, kann das
+ * Ergebnis nicht beurteilen.
+ */
+const STUFENNAME: Record<string, string> = {
+  bytes: 'Datei identisch',
+  bilder: 'gleiche Bilder',
+  'bilder-teil': 'Bild im Beleg enthalten',
+  text: 'gleicher Text',
+  name: 'gleicher Name',
+  betrag: 'Betrag im Text',
+  groesse: 'nur gleiche Größe',
+};
+
+function Stufenbilanz({ stufen }: { stufen: Record<string, number> }) {
+  const treffer = Object.entries(stufen).filter(([, anzahl]) => anzahl > 0);
+  if (treffer.length === 0) return null;
+
+  return (
+    <p className="grau klein">
+      Zugeordnet über:{' '}
+      {treffer.map(([stufe, anzahl]) => `${STUFENNAME[stufe] ?? stufe} (${anzahl})`).join(', ')}
+    </p>
+  );
+}
+
 export function Ablagevorschau({ ergebnis, onAusfuehren, onSchliessen, laedt }: Props) {
   const fehlgeschlagen = ergebnis.eintraege.filter((e) => e.fehler);
 
@@ -60,7 +89,7 @@ export function Ablagevorschau({ ergebnis, onAusfuehren, onSchliessen, laedt }: 
                         className={`marke aktion ${e.aktion}`}
                         title={
                           e.aktion === 'verschieben'
-                            ? `Die Datei liegt schon in OneDrive (${e.abgleich}) und wird nur einsortiert`
+                            ? 'Die Datei liegt schon in OneDrive und wird nur einsortiert'
                             : 'In OneDrive nicht gefunden – wird aus sevDesk hochgeladen'
                         }
                       >
@@ -68,6 +97,13 @@ export function Ablagevorschau({ ergebnis, onAusfuehren, onSchliessen, laedt }: 
                       </span>
                     )}
                     <span title={e.begruendung}>{e.quelle?.dateiname ?? e.dateiname}</span>
+                    {/*
+                      Woran der Abgleich hing, steht sichtbar dabei und nicht
+                      nur im Tooltip: ob eine Datei byteweise dieselbe war oder
+                      ob nur die Groesse passte, ist der Unterschied zwischen
+                      "stimmt" und "vermutlich".
+                    */}
+                    {e.abgleich && <span className="grau klein"> · {e.abgleich}</span>}
                     {e.vonHand && <span className="grau klein"> · von Hand</span>}
                     {e.fehler && <span className="klein"> — {e.fehler}</span>}
                   </li>
@@ -78,6 +114,8 @@ export function Ablagevorschau({ ergebnis, onAusfuehren, onSchliessen, laedt }: 
           );
         })}
       </div>
+
+      {ergebnis.stufen && <Stufenbilanz stufen={ergebnis.stufen} />}
 
       {ergebnis.ohneBeleg > 0 && (
         <p className="grau klein">

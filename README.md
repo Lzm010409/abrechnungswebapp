@@ -308,27 +308,59 @@ POST { "ordnerId": "017CTAN…", "unterordner": "Konto", "dateiId": "01ABC…" }
 > Verschieben von einem erfolgreichen nicht zu unterscheiden.
 
 Die Liste wird gelesen wie überall bei n8n — ohne feste Feldnamen. Erkannt
-werden `id`/`itemId`/`driveItemId`, `name`/`filename` und `size`; Einträge mit
-einem `folder`-Objekt werden übersprungen, damit kein Ordner in sich selbst
-wandert. Die OneDrive-Antwort passt also unverändert:
+werden `id`/`itemId`/`driveItemId`, `name`/`filename`, `size`, dazu `cTag` und
+`@microsoft.graph.downloadUrl`. Einträge mit einem `folder`-Objekt werden
+übersprungen, damit kein Ordner in sich selbst wandert. Die OneDrive-Antwort
+passt also unverändert — **sie muss aber vollständig durchgereicht werden**:
+ohne `@microsoft.graph.downloadUrl` kommt der Abgleich nicht an den Inhalt und
+fällt auf Name und Größe zurück.
 
-```
-→ [ { "id": "01ABC…", "name": "Scan_20260622.pdf", "size": 8421 },
-    { "id": "01DEF…", "name": "Konto", "folder": { "childCount": 3 } } ]
-```
+### Wie der Abgleich entscheidet
 
-**Der Abgleich** läuft in zwei Stufen, die stärkere zuerst:
+Name und Größe genügen nicht. sevDesk nennt jeden Beleg `beleg-<voucherId>.pdf`,
+während in OneDrive der Name des Lieferanten steht — und Größen wiederholen
+sich: in einem geprüften Monatsordner lagen fünf verschiedene Rechnungen mit
+exakt 95 370 Bytes. Von 67 Dateien wurde deshalb genau eine zugeordnet.
 
-1. **gleicher Dateiname** — trägt bei allem, was von Hand hochgeladen wurde
-   oder dessen Name sevDesk unverändert übernommen hat
-2. **gleiche Größe in Bytes, und zwar eindeutig** — sevDesk-Belege heißen bei
-   uns `beleg-<voucherId>.pdf`, der Name des Originals ist ein ganz anderer.
-   Gibt es mehrere Dateien derselben Größe, wird **nicht geraten**
+Deshalb wird jede Datei **einmal vollständig gelesen** — die aus OneDrive über
+ihre vorab beglaubigte `downloadUrl`, ohne n8n damit zu belasten — und in
+mehrere unabhängige Merkmale zerlegt. Der Abgleich läuft dann von hart nach
+weich:
+
+| Stufe | Merkmal | Trägt bei |
+|---|---|---|
+| `bytes` | SHA-256 der Rohbytes | sevDesk gibt die Datei unverändert zurück — der Normalfall bei einseitigen Belegen |
+| `bilder` | Hashes der eingebetteten Bildströme | Scans, die anders verpackt, aber dasselbe Bild sind |
+| `bilder-teil` | Bildströme der Datei stecken im Beleg | sevDesk gibt gescannte Belege **seitenweise** heraus; die Anwendung setzt sie wieder zusammen, die Datei ist danach eine andere — die Bildströme überstehen das unverändert |
+| `text` | Hash der normalisierten Textebene | erzeugte Rechnungen, deren PDF neu geschrieben wurde |
+| `name` | gleicher Dateiname | was von Hand hochgeladen wurde |
+| `betrag` | Betrag der Buchung steht im Text der Datei | letzter inhaltlicher Anker |
+| `groesse` | gleiche Größe in Bytes | nur wenn sonst nichts passt |
+
+Jede Stufe nimmt **nur, was auf beiden Seiten eindeutig ist**: ein Beleg, der zu
+zwei Dateien passt, wird ebensowenig zugeordnet wie eine Datei, die zu zwei
+Belegen passt. Lieber eine Kopie hochladen als den falschen Beleg verschieben —
+eine falsch einsortierte Datei fällt niemandem auf.
+
+Die Vorschau schreibt an jeden Beleg, welche Stufe gegriffen hat, und
+darunter eine Bilanz (*„Zugeordnet über: Datei identisch (12), gleicher Text
+(4), nur gleiche Größe (1)"*). Erst damit lässt sich beurteilen, wie belastbar
+ein Ergebnis ist.
+
+Das Lesen kostet beim ersten Mal einige Sekunden je Monat. Danach nichts mehr:
+die Fingerabdrücke liegen in der Tabelle `abdruecke`. Für OneDrive-Dateien
+schlüsselt sie der `cTag`, der sich mit dem Inhalt ändert; für die eigenen
+Belege ihre `dateiId` — die *ist* der Inhalts-Hash und veraltet deshalb nie.
 
 Was sich nicht zuordnen lässt, wird hochgeladen wie bisher — besser eine Kopie
 als ein fehlender Beleg. Was in OneDrive übrig bleibt, steht in der Vorschau
 unter *„… ohne passende Buchung — bleiben liegen"*. Genau dort zeigt sich, wo
 der Abgleich danebenliegt oder ein Beleg in sevDesk fehlt.
+
+> Kommt der Server nicht an `*.sharepoint.com` heran, sind die Inhalte nicht zu
+> holen und es bleibt bei Name und Größe. Die Vorschau sagt das dann
+> ausdrücklich — ein dürftiges Ergebnis soll nicht wie ein ordentliches
+> aussehen.
 
 Sind die beiden Variablen nicht gesetzt, wird der Monatsordner gar nicht erst
 gelesen und alles läuft wie zuvor.
@@ -587,7 +619,7 @@ Werte stehen in `packages/server/src/ai/client.ts` unter `BUDGET`.
 npm test
 ```
 
-383 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+404 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 

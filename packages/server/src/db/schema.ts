@@ -126,3 +126,23 @@ export const dateien = pgTable(
   },
   (t) => [primaryKey({ columns: [t.monat, t.dateiId] })],
 );
+
+/**
+ * Fingerabdruecke der Belegdateien, fuer den Abgleich mit OneDrive.
+ *
+ * Der Abgleich muss jede Datei einmal vollstaendig lesen, um ihren Inhalt zu
+ * kennen - eigene Belege wie fremde. Das kostet Zeit und Bandbreite und faellt
+ * ohne diesen Zwischenspeicher bei jedem Lauf erneut an.
+ *
+ * `schluessel` traegt die Herkunft mit ("onedrive:<itemId>" bzw.
+ * "beleg:<dateiId>"), damit sich beide Seiten dieselbe Tabelle teilen. `marke`
+ * sagt, wann ein Abdruck veraltet: bei OneDrive der `cTag`, der sich mit dem
+ * Inhalt aendert, bei den eigenen Belegen die dateiId - sie IST der
+ * Inhalts-Hash und aendert sich deshalb nie fuer denselben Inhalt.
+ */
+export const abdruecke = pgTable('abdruecke', {
+  schluessel: text().primaryKey(),
+  marke: text().notNull(),
+  abdruck: jsonb().notNull(),
+  erstelltAm: timestamp({ withTimezone: true }).notNull().defaultNow(),
+});
