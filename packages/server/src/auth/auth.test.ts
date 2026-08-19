@@ -5,10 +5,11 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { exportJWK, generateKeyPair, SignJWT, type JWK, type KeyLike } from 'jose';
 import type { FastifyInstance } from 'fastify';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { baueApp, entferneGeheimnisse } from '../app.js';
 import type { Config } from '../config.js';
 import type { Datenbank } from '../db/index.js';
+import { bereiteTestDatenbankVor, legeTestDatenbankAn } from '../testhilfen/datenbank.js';
 import { starteMockSevDesk, type MockSevDesk } from '../testhilfen/mockSevdesk.js';
 
 /**
@@ -24,6 +25,10 @@ import { starteMockSevDesk, type MockSevDesk } from '../testhilfen/mockSevdesk.j
 
 const TENANT = 'test-tenant';
 const CLIENT_ID = 'test-client';
+
+// Der Aufbau der eingebetteten Datenbank dauert einige Sekunden und gehoert
+// deshalb nicht in die Zeitvorgabe des ersten Tests.
+beforeAll(bereiteTestDatenbankVor, 60_000);
 
 let sevdesk: MockSevDesk;
 let app: FastifyInstance;
@@ -49,9 +54,10 @@ async function starte(auth: Config['auth']) {
     port: 0,
     logLevel: 'silent',
     dataDir,
+    datenbankUrl: 'postgres://test/test',
     sevdesk: { token: 't', baseUrl: sevdesk.url },
     auth,
-  });
+  }, { db: await legeTestDatenbankAn() });
   app = instanz.app;
   db = instanz.db;
 }
@@ -63,7 +69,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await app?.close();
-  db?.schliesse();
+  await db?.schliesse();
   await sevdesk?.schliesse();
   rmSync(dataDir, { recursive: true, force: true });
 });

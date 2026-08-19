@@ -30,6 +30,8 @@ export interface Config {
   port: number;
   logLevel: string;
   dataDir: string;
+  /** Verbindung zur Postgres-Datenbank. Einzige Schnittstelle zum Bestand. */
+  datenbankUrl: string;
   /** Gebautes Frontend. Ohne Angabe packages/web/dist relativ zum Startpfad. */
   webDist?: string;
 
@@ -177,6 +179,27 @@ function leseEffort(): Effort {
   );
 }
 
+/**
+ * Die Datenbank ist Pflicht.
+ *
+ * In Coolify ist der interne Hostname einer Standalone-Datenbank ihre UUID -
+ * die Adresse ist damit umgebungsabhaengig und steht ausschliesslich in der
+ * Umgebung, niemals im Quelltext.
+ */
+function ladeDatenbankUrl(): string {
+  const url = env('DATABASE_URL');
+  if (!url) {
+    throw new Error(
+      'DATABASE_URL fehlt. Die Anwendung haelt ihren Bestand in einer eigenen ' +
+        'Postgres-Datenbank.\n' +
+        'Lokal: DATABASE_URL=postgres://abrechnung:...@localhost:5432/abrechnung\n' +
+        'In Coolify: Verbindungszeichenkette der Standalone-Datenbank als ' +
+        'Umgebungsvariable hinterlegen. Siehe DATENBANK-UMSTELLUNG.md.',
+    );
+  }
+  return url;
+}
+
 export function ladeConfig(): Config {
   const dataDir = resolve(env('DATA_DIR') ?? './data');
   if (!existsSync(dataDir)) {
@@ -194,6 +217,7 @@ export function ladeConfig(): Config {
     port: Number(env('PORT') ?? 3000),
     logLevel: env('LOG_LEVEL') ?? 'info',
     dataDir,
+    datenbankUrl: ladeDatenbankUrl(),
 
     sevdesk: {
       token: pflicht('SEVDESK_API_TOKEN'),

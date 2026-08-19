@@ -66,14 +66,14 @@ export class MonatsDienst {
     beobachter?: LadeBeobachter,
   ): Promise<Monat> {
     if (!neuLaden) {
-      const zwischengespeichert = this.deps.db.ladeMonat(monat);
+      const zwischengespeichert = await this.deps.db.ladeMonat(monat);
       if (zwischengespeichert) {
         const positionen = await this.stelleDateienSicher(
           monat,
           zwischengespeichert.positionen,
           beobachter,
         );
-        return this.veredele(monat, positionen, zwischengespeichert);
+        return await this.veredele(monat, positionen, zwischengespeichert);
       }
     }
     return this.synchronisiere(monat, beobachter);
@@ -242,7 +242,7 @@ export class MonatsDienst {
     // Zwischenstand wird bewusst NICHT in den Cache geschrieben: bricht der
     // Abruf danach ab, waere sonst ein Monat ohne Belege gespeichert.
     if (beobachter?.zwischenstand) {
-      beobachter.zwischenstand(this.fuehreZusammen(monat, positionen));
+      beobachter.zwischenstand(await this.fuehreZusammen(monat, positionen));
     }
 
     beobachter?.fortschritt({
@@ -376,16 +376,24 @@ export class MonatsDienst {
    * Korrektur liesse sich dann nie wieder zurueecknehmen, weil der sevDesk-Stand
    * verloren waere.
    */
-  private veredele(monat: string, rohPositionen: Position[], basis?: Monat): Monat {
-    const roh = this.baueRohmonat(monat, rohPositionen, basis);
-    this.deps.db.speichereMonat(roh);
+  private async veredele(
+    monat: string,
+    rohPositionen: Position[],
+    basis?: Monat,
+  ): Promise<Monat> {
+    const roh = await this.baueRohmonat(monat, rohPositionen, basis);
+    await this.deps.db.speichereMonat(roh);
     return this.fuehreZusammen(monat, rohPositionen, basis);
   }
 
   /** Wie `veredele`, aber ohne den Cache zu schreiben - fuer Zwischenstaende. */
-  private fuehreZusammen(monat: string, rohPositionen: Position[], basis?: Monat): Monat {
-    const roh = this.baueRohmonat(monat, rohPositionen, basis);
-    const overrides = this.deps.db.ladeOverrides(monat);
+  private async fuehreZusammen(
+    monat: string,
+    rohPositionen: Position[],
+    basis?: Monat,
+  ): Promise<Monat> {
+    const roh = await this.baueRohmonat(monat, rohPositionen, basis);
+    const overrides = await this.deps.db.ladeOverrides(monat);
 
     const zusammengefuehrt = rohPositionen.map((p) => {
       const patch = overrides.get(p.id);
@@ -404,7 +412,11 @@ export class MonatsDienst {
     };
   }
 
-  private baueRohmonat(monat: string, rohPositionen: Position[], basis?: Monat): Monat {
+  private async baueRohmonat(
+    monat: string,
+    rohPositionen: Position[],
+    basis?: Monat,
+  ): Promise<Monat> {
     return {
       monat,
       checkAccountId: this.deps.checkAccount.id,
@@ -412,7 +424,7 @@ export class MonatsDienst {
       positionen: rohPositionen,
       summen: berechneSummen(rohPositionen),
       verwaisteBelege: basis?.verwaisteBelege ?? [],
-      kontoauszuege: this.deps.db.ladeKontoauszuege(monat),
+      kontoauszuege: await this.deps.db.ladeKontoauszuege(monat),
       synchronisiertAm: basis?.synchronisiertAm ?? new Date().toISOString(),
     };
   }
@@ -438,7 +450,7 @@ export class MonatsDienst {
     positionIds: string[],
     patch: PositionsPatch,
   ): Promise<Monat> {
-    const aktuell = this.deps.db.ladeMonat(monat);
+    const aktuell = await this.deps.db.ladeMonat(monat);
     if (!aktuell) {
       throw new NichtGefunden(
         `Monat ${monat} ist noch nicht geladen. Zuerst aus sevDesk laden.`,
@@ -453,7 +465,7 @@ export class MonatsDienst {
       if (!position) {
         throw new NichtGefunden(`Buchung ${positionId} existiert nicht in ${monat}.`);
       }
-      this.deps.db.speichereOverride(monat, positionId, baueTeilPatch(position, patch));
+      await this.deps.db.speichereOverride(monat, positionId, baueTeilPatch(position, patch));
     }
 
     return this.veredele(monat, aktuell.positionen);
@@ -465,9 +477,9 @@ export class MonatsDienst {
    * Dient dem Ueberblick, welche Monate noch offen sind - typischerweise weil
    * Buchungen in sevDesk noch nicht zugeordnet waren, als zuletzt geladen wurde.
    */
-  status(monat: string): MonatsStatus {
-    const zwischengespeichert = this.deps.db.ladeMonat(monat);
-    const kontoauszuege = this.deps.db.ladeKontoauszuege(monat).length;
+  async status(monat: string): Promise<MonatsStatus> {
+    const zwischengespeichert = await this.deps.db.ladeMonat(monat);
+    const kontoauszuege = (await this.deps.db.ladeKontoauszuege(monat)).length;
 
     if (!zwischengespeichert) {
       return {
@@ -480,7 +492,7 @@ export class MonatsDienst {
 
     // Fuer den Status zaehlt die zusammengefuehrte Sicht - eine manuell
     // geschlossene Position darf den Monat nicht offen halten.
-    const overrides = this.deps.db.ladeOverrides(monat);
+    const overrides = await this.deps.db.ladeOverrides(monat);
     const zusammengefuehrt = zwischengespeichert.positionen.map((p) => {
       const patch = overrides.get(p.id);
       if (!patch) return aktualisiereStatus(p);
@@ -507,8 +519,8 @@ export class MonatsDienst {
 
   /** Nimmt eine manuelle Korrektur zurueck und stellt den sevDesk-Stand her. */
   async setzePositionZurueck(monat: string, positionId: string): Promise<Monat> {
-    this.deps.db.loescheOverride(monat, positionId);
-    const aktuell = this.deps.db.ladeMonat(monat);
+    await this.deps.db.loescheOverride(monat, positionId);
+    const aktuell = await this.deps.db.ladeMonat(monat);
     if (!aktuell) {
       throw new NichtGefunden(`Monat ${monat} ist noch nicht geladen.`);
     }

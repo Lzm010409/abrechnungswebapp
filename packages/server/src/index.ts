@@ -8,7 +8,7 @@ async function start(): Promise<void> {
   const beenden = async (signal: string) => {
     app.log.info({ signal }, 'Fahre herunter');
     await app.close();
-    db.schliesse();
+    await db.schliesse();
     process.exit(0);
   };
   process.on('SIGTERM', () => void beenden('SIGTERM'));
