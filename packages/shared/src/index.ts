@@ -397,7 +397,7 @@ export interface OneDriveDatei {
  * "hochladen" ist der Rueckfall fuer Belege, zu denen sich in OneDrive nichts
  * Passendes finden liess - besser eine Kopie als ein fehlender Beleg.
  */
-export type Ablageaktion = 'verschieben' | 'hochladen';
+export type Ablageaktion = 'verschieben' | 'hochladen' | 'offen';
 
 /** Was mit einem einzelnen Beleg bei der Ablage geschehen ist bzw. soll. */
 export interface AblageEintrag {
@@ -407,12 +407,26 @@ export interface AblageEintrag {
   /** Bytes des Belegs */
   groesse?: number;
   /**
-   * Betrag der zugehoerigen Buchung.
+   * Was ueber die Buchung bekannt ist.
    *
-   * Letzter Anker des Abgleichs: steht er im Text einer Datei im Monatsordner
-   * und sonst nirgends, gehoert die Datei zu dieser Buchung.
+   * Der Abgleich mit OneDrive entscheidet daran, nicht mehr am Dateinamen: die
+   * Datei im Monatsordner ist das Original der Rechnung, die Buchung ist die
+   * Zahlung dafuer. Verbunden sind beide ueber das, was auf dem Papier steht -
+   * Betrag, Rechnungsnummer im Verwendungszweck, Name des Empfaengers, Datum.
    */
-  betrag?: number;
+  buchung?: {
+    /** Wertstellung der Zahlung, ISO-Datum */
+    datum: string;
+    /** Negativ bei Ausgaben; verglichen wird der Betrag ohne Vorzeichen */
+    betrag: number;
+    verwendungszweck?: string;
+    /** Zahlungsempfaenger laut Bank */
+    gegenkonto?: string;
+    /** Aussteller laut KI-Belegauswertung, falls vorhanden */
+    aussteller?: string;
+    /** Belegdatum laut KI-Belegauswertung, falls vorhanden */
+    belegdatum?: string;
+  };
   ordner: Ablageordner;
   /** Kurze Begruendung der Einordnung, fuer die Anzeige */
   begruendung: string;
@@ -426,6 +440,15 @@ export interface AblageEintrag {
   abgleich?: string;
   /** Welche Stufe des Abgleichs gegriffen hat - siehe onedrive/abgleich.ts */
   stufe?: string;
+  /** Punktzahl der Bewertung, sofern die Zuordnung darueber zustande kam */
+  punkte?: number;
+  /**
+   * Der beste Kandidat, der es nicht geworden ist.
+   *
+   * Steht in der Vorschau bei den nicht zugeordneten Belegen. Nur daran laesst
+   * sich erkennen, ob der Abgleich knapp danebenlag oder weit weg war.
+   */
+  knappVerfehlt?: { dateiname: string; punkte: number; grund: string };
   /** Fehlermeldung, wenn die Ablage fehlschlug */
   fehler?: string;
 }
