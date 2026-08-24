@@ -349,7 +349,7 @@ Sache entschieden. Dazu der gleiche Dateiname (`name`).
 | 1 | **Kennung** | Rechnungs-, Kunden- oder Vertragsnummer aus dem **Verwendungszweck** der Buchung steht im Beleg. Der belastbarste Anker überhaupt — eine Lastschrift trägt die Nummer, die auch auf der Rechnung steht. | 45 |
 | 2 | **Betrag** | Der Bruttobetrag der Buchung in deutscher Schreibweise im Text; mehr, wenn er neben einem Summenfeld steht (*Rechnungsbetrag*, *Endbetrag*, *Zu zahlen*). | 30 (+12) |
 | 3 | **Lieferant** | Der Zahlungsempfänger laut Bank bzw. der Aussteller laut KI-Auswertung im Text oder im Dateinamen. Rechtsformen und Füllwörter fallen weg, damit „Vodafone West GmbH" auf „Vodafone" trifft. | 22 |
-| 4 | **Datum** | Ein Datum aus Text **oder Dateiname** im Fenster 90 Tage vor bis 5 Tage nach der Zahlung; je näher, desto mehr. Der Dateiname ist hier entscheidend: die eingescannten Belege (`tanken-13.07.2026.pdf`, `bewirtung-25.07.2026.pdf`) haben keine Textebene, tragen ihr Datum aber im Namen. | bis 18 (+10) |
+| 4 | **Datum** | Ein Datum aus Text **oder Dateiname** im Fenster 90 Tage vor bis 5 Tage nach der Zahlung; je näher, desto mehr. Der Dateiname trägt hier viel: 36 von 55 Dateien im geprüften Monat haben ihr Datum im Namen. | bis 18 (+10) |
 | 5 | **Zusammenspiel** | Zwei unabhängige Bestätigungen an derselben Datei. Ein Betrag findet sich schnell zweimal, ein Datum sowieso — beides zusammen praktisch nie. | +15 |
 
 Zugeordnet wird dann **global**: das bestbewertete Paar im ganzen Monat zuerst,
@@ -367,6 +367,32 @@ Die Vorschau schreibt an jeden Beleg, welche Stufe gegriffen hat und mit wie
 vielen Punkten — und bei den **nicht** zugeordneten, welche Datei am nächsten
 lag und warum es nicht gereicht hat. Erst damit lässt sich beurteilen, wo
 nachzubessern ist.
+
+#### Belege ohne Textebene
+
+Fast die Hälfte des Monatsordners sind **Fotos und Scans** — Tanken, Bewirtung,
+Geschenke, TÜV (24 von 55 im geprüften Monat). Ein PDF-Leser findet darin keinen
+Text; für den Abgleich wären sie bis auf ihren Dateinamen unsichtbar.
+
+Deshalb werden genau diese Dateien vom Modell gelesen — derselbe Dienst, der
+auch die sevDesk-Belege auswertet, nur auf den Monatsordner angewendet. Claude
+bekommt das PDF als Dokument und liest die Seite als Bild; ein eigener
+OCR-Baukasten wird dafür nicht gebraucht und wäre auf abfotografierten
+Tankquittungen auch deutlich schwächer.
+
+Zurück kommen Aussteller, Betrag, Belegdatum, Umsatzsteuer und Kategorie. Sie
+gehen in die **Bewertung** ein, ausdrücklich **nicht** in die Beweisstufen: der
+Inhalt ist gedeutet, nicht ausgelesen — zwei verschiedene Tankquittungen dürfen
+darüber nicht miteinander verwechselt werden können.
+
+Gefragt wird nur, wo keine Textebene da ist, und nur einmal je Datei: das
+Ergebnis liegt im Fingerabdruck-Zwischenspeicher. Bei rund 25 Scans im Monat
+kostet das einmalig etwa 30 Cent. Ohne `ANTHROPIC_API_KEY` entfällt es, dann
+entscheidet bei diesen Dateien nur der Dateiname.
+
+Abgebrochene Downloads (`.crdownload`, `.part`, `.tmp`) werden übersprungen —
+im geprüften Ordner lag ein solcher, und als Kandidat hätte er einem Beleg die
+richtige Datei wegnehmen können.
 
 Das Lesen der Dateien kostet beim ersten Mal einige Sekunden je Monat. Danach
 nichts mehr: die Fingerabdrücke liegen in der Tabelle `abdruecke`. Für
@@ -638,7 +664,7 @@ Werte stehen in `packages/server/src/ai/client.ts` unter `BUDGET`.
 npm test
 ```
 
-417 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+423 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 

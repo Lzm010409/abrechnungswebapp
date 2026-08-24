@@ -587,3 +587,18 @@ describe('leseDateiliste', () => {
     expect(leseDateiliste([{ name: 'ohne Kennung.pdf' }, { id: '01X' }, 'Text'])).toEqual([]);
   });
 });
+
+describe('Unfertige Dateien im Monatsordner', () => {
+  it('nimmt abgebrochene Downloads nicht als Beleg', () => {
+    // Im echten Monatsordner lag "Nicht bestaetigt 570149.crdownload". Als
+    // Kandidat mitzulaufen haette einem Beleg die richtige Datei wegnehmen
+    // koennen.
+    expect(
+      leseDateiliste([
+        { id: '01A', name: 'Nicht bestätigt 570149.crdownload', size: 24901 },
+        { id: '01B', name: 'Rechnung.pdf', size: 1000 },
+        { id: '01C', name: 'halb.pdf.part', size: 10 },
+      ]).map((d) => d.dateiname),
+    ).toEqual(['Rechnung.pdf']);
+  });
+});

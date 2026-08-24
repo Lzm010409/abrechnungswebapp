@@ -122,7 +122,17 @@ export interface Aufbereitet {
 
 export function bereiteAuf(datei: OneDriveDatei, abdruck: Abdruck | undefined): Aufbereitet {
   const name = normalisiere(datei.dateiname);
-  const text = abdruck?.text ? normalisiere(abdruck.text) : undefined;
+
+  /*
+   * Was ein Modell auf einem Scan gelesen hat, zaehlt hier genauso wie eine
+   * echte Textebene - fuer die Bewertung, nicht fuer die Beweise. Ohne das
+   * waeren Tank-, Bewirtungs- und Geschenkbelege bis auf ihren Dateinamen
+   * unsichtbar, und das ist fast die Haelfte des Monatsordners.
+   */
+  const teile = [abdruck?.text, abdruck?.gelesen?.text]
+    .filter((t): t is string => Boolean(t))
+    .map(normalisiere);
+  const text = teile.length > 0 ? teile.join(' ') : undefined;
   const heuhaufen = text ? `${name} ${text}` : name;
 
   return { datei, heuhaufen, ...(text ? { text } : {}), daten: datumsangaben(heuhaufen) };

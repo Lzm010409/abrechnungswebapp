@@ -163,3 +163,35 @@ describe('bewerte', () => {
     expect(b.punkte).toBe(0);
   });
 });
+
+describe('Gelesene Belege', () => {
+  const gelesen = (text: string): Abdruck => ({
+    groesse: 1_400_000,
+    sha256: 'x',
+    bilder: ['b1'],
+    gelesen: { text, konfidenz: 0.9 },
+  });
+
+  it('nutzt, was das Modell auf dem Scan gelesen hat', () => {
+    // Ohne das haette die Tankquittung nur ihr Datum im Namen - mit dem Betrag
+    // wird daraus eine belastbare Zuordnung.
+    const b = bewerte(
+      beleg({ datum: '2026-07-15', betrag: -87.5, gegenkonto: 'Shell Deutschland' }),
+      bereiteAuf(datei('tanken-13.07.2026.pdf'), gelesen('shell tankstelle 87,50 2026-07-13')),
+    );
+
+    expect(b.punkte).toBeGreaterThanOrEqual(45);
+    expect(b.befunde.map((x) => x.verfahren)).toEqual(
+      expect.arrayContaining(['betrag', 'lieferant', 'datum']),
+    );
+  });
+
+  it('bleibt beim Dateinamen, wenn nichts gelesen wurde', () => {
+    const b = bewerte(
+      beleg({ datum: '2026-07-15', betrag: -87.5 }),
+      bereiteAuf(datei('tanken-13.07.2026.pdf'), undefined),
+    );
+
+    expect(b.befunde.map((x) => x.verfahren)).toEqual(['datum']);
+  });
+});

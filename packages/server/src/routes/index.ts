@@ -436,6 +436,44 @@ export async function registriereRouten(
         hole: (itemId, cTag) => ctx.db.ladeAbdruck(itemId, cTag),
         lege: (itemId, cTag, abdruck) => ctx.db.speichereAbdruck(itemId, cTag, abdruck),
       },
+      /*
+       * Belege ohne Textebene - Tanken, Bewirtung, Geschenke - werden vom
+       * Modell gelesen. Ohne KI-Schluessel entfaellt das; dann entscheidet bei
+       * diesen Dateien nur der Dateiname.
+       */
+      ...(ctx.ki
+        ? {
+            belegleser: async (daten: Buffer, dateiname: string) => {
+              try {
+                const gelesen = await ctx.ki!.extrahiereBeleg(daten, dateiname);
+                const teile = [
+                  gelesen.aussteller,
+                  gelesen.belegdatum,
+                  gelesen.kategorie,
+                  gelesen.betrag === undefined ? undefined : gelesen.betrag.toFixed(2).replace('.', ','),
+                  gelesen.ustBetrag === undefined
+                    ? undefined
+                    : gelesen.ustBetrag.toFixed(2).replace('.', ','),
+                  gelesen.aktenzeichen,
+                ].filter((t): t is string => Boolean(t));
+
+                if (teile.length === 0) return null;
+                return {
+                  text: teile.join(' '),
+                  ...(gelesen.konfidenz === undefined ? {} : { konfidenz: gelesen.konfidenz }),
+                };
+              } catch (err) {
+                // Ein Beleg, den das Modell nicht lesen kann, darf den Abgleich
+                // nicht anhalten - er faellt dann auf den Dateinamen zurueck.
+                app.log.warn(
+                  { datei: dateiname, err: err instanceof Error ? err.message : String(err) },
+                  'Beleg liess sich nicht auslesen',
+                );
+                return null;
+              }
+            },
+          }
+        : {}),
       log: app.log,
     });
 
