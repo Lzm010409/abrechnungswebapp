@@ -43,7 +43,36 @@ export interface Abdruck {
   textHash?: string;
   /** Normalisierter Text; fehlt ohne Textebene. */
   text?: string;
+  /**
+   * Was ein Modell auf dem Beleg gelesen hat - nur bei Dateien ohne Textebene.
+   *
+   * Fast die Haelfte der Belege im Monatsordner sind Fotos oder Scans: Tanken,
+   * Bewirtung, Geschenke. Sie tragen keinen Text, den ein PDF-Leser findet, und
+   * waren damit fuer den Abgleich bis auf ihren Dateinamen unsichtbar.
+   *
+   * Bewusst getrennt von `text` gefuehrt und ausdruecklich KEIN Beweis: der
+   * Inhalt ist gedeutet, nicht ausgelesen. Er geht in die Bewertung ein, nie in
+   * die Hash-Stufen - zwei verschiedene Tankquittungen koennten sonst denselben
+   * Texthash bekommen und miteinander verwechselt werden.
+   */
+  gelesen?: {
+    text: string;
+    /** Selbsteinschaetzung des Modells, 0..1. */
+    konfidenz?: number;
+  };
 }
+
+/**
+ * Liest einen Beleg, dem die Textebene fehlt.
+ *
+ * Uebergeben wird der Dienst, den die Anwendung ohnehin fuer die
+ * Belegauswertung benutzt - hier nur auf die Dateien im Monatsordner
+ * angewendet.
+ */
+export type Belegleser = (
+  daten: Buffer,
+  dateiname: string,
+) => Promise<{ text: string; konfidenz?: number } | null>;
 
 function hashe(daten: Uint8Array | string): string {
   return createHash('sha256').update(daten).digest('hex');
@@ -78,17 +107,36 @@ async function leseBildstroeme(daten: Buffer): Promise<{ bilder: string[]; seite
   }
 }
 
-export async function berechneAbdruck(daten: Buffer): Promise<Abdruck> {
+export async function berechneAbdruck(
+  daten: Buffer,
+  dateiname = '',
+  leser?: Belegleser,
+): Promise<Abdruck> {
   const { bilder, seiten } = await leseBildstroeme(daten);
   const text = normalisiereText((await leseSeitentexte(daten)).join(' '));
+  // Ein paar Zeichen Restmuell gibt es auch in bildbasierten PDFs. Unter
+  // dieser Grenze taugt der Text nicht als Merkmal.
+  const hatTextebene = text.length >= 40;
 
-  return {
+  const abdruck: Abdruck = {
     groesse: daten.byteLength,
     sha256: hashe(daten),
     bilder,
     ...(seiten === undefined ? {} : { seiten }),
-    // Ein paar Zeichen Restmuell gibt es auch in bildbasierten PDFs. Unter
-    // dieser Grenze taugt der Text nicht als Merkmal.
-    ...(text.length >= 40 ? { textHash: hashe(text), text } : {}),
+    ...(hatTextebene ? { textHash: hashe(text), text } : {}),
   };
+
+  // Nur wo nichts zu lesen war. Ein Modell zu fragen kostet Geld und Zeit; bei
+  // einer vorhandenen Textebene waere es beides umsonst ausgegeben.
+  if (!hatTextebene && leser) {
+    const gelesen = await leser(daten, dateiname);
+    if (gelesen && gelesen.text.trim().length > 0) {
+      abdruck.gelesen = {
+        text: normalisiereText(gelesen.text),
+        ...(gelesen.konfidenz === undefined ? {} : { konfidenz: gelesen.konfidenz }),
+      };
+    }
+  }
+
+  return abdruck;
 }

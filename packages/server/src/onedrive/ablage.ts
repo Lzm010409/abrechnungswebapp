@@ -9,7 +9,7 @@ import type {
   Position,
 } from '@abrechnung/shared';
 import { leseSeitentexte, ordneBuchungenSeitenZu } from '../pdf/seitenzuordnung.js';
-import { berechneAbdruck, type Abdruck } from './abdruck.js';
+import { berechneAbdruck, type Abdruck, type Belegleser } from './abdruck.js';
 import { gleicheAb, type Stufe } from './abgleich.js';
 import { holeAbdruecke, type AbdruckSpeicher } from './inhalte.js';
 import { bestimmeOrdner, istTankbeleg } from './kategorie.js';
@@ -42,6 +42,9 @@ const RUECKZUG_MS = 1_000;
 
 /** Antworten, bei denen ein zweiter Versuch sinnvoll ist. */
 const NOCHMAL = new Set([429, 500, 502, 503, 504]);
+
+/** Endungen abgebrochener oder halbfertiger Downloads. */
+const UNFERTIG = /\.(crdownload|part|partial|tmp|download)$/i;
 
 export interface AblageOptionen {
   /** Webhook, der zu Jahr und Monat die Ordner-ID liefert. */
@@ -78,6 +81,15 @@ export interface AblageAbhaengigkeiten {
   ladeDatei: (dateiId: string) => Promise<Buffer>;
   /** Zwischenspeicher der Fingerabdruecke; ohne ihn wird jedes Mal neu gelesen. */
   abdruckSpeicher?: AbdruckSpeicher;
+  /**
+   * Liest Belege, denen die Textebene fehlt.
+   *
+   * Ohne ihn bleiben Scans - Tanken, Bewirtung, Geschenke - bis auf ihren
+   * Dateinamen unsichtbar. Mit ihm kostet jeder solche Beleg einmal einen
+   * Modellaufruf; das Ergebnis wandert in den Zwischenspeicher und wird nie
+   * ein zweites Mal geholt.
+   */
+  belegleser?: Belegleser;
   log?: { info: (o: unknown, m?: string) => void; warn: (o: unknown, m?: string) => void };
 }
 
@@ -377,6 +389,7 @@ export class OneDriveAblage {
     const { abdruecke, ausSpeicher, fehlgeschlagen } = await holeAbdruecke(vorhanden, {
       fetchImpl: this.doFetch,
       ...(this.deps.abdruckSpeicher ? { speicher: this.deps.abdruckSpeicher } : {}),
+      ...(this.deps.belegleser ? { leser: this.deps.belegleser } : {}),
       ...(this.deps.log ? { log: this.deps.log } : {}),
       melde: (gelesen, gesamt) =>
         melde({
@@ -451,11 +464,18 @@ export class OneDriveAblage {
      */
     const zaehle = (
       liste: Array<{ abdruck?: Abdruck }>,
-    ): { gesamt: number; ohneAbdruck: number; mitText: number; mitBildern: number } => ({
+    ): {
+      gesamt: number;
+      ohneAbdruck: number;
+      mitText: number;
+      mitBildern: number;
+      vomModellGelesen: number;
+    } => ({
       gesamt: liste.length,
       ohneAbdruck: liste.filter((x) => !x.abdruck).length,
       mitText: liste.filter((x) => x.abdruck?.textHash).length,
       mitBildern: liste.filter((x) => (x.abdruck?.bilder.length ?? 0) > 0).length,
+      vomModellGelesen: liste.filter((x) => x.abdruck?.gelesen).length,
     });
 
     this.deps.log?.info(
@@ -727,6 +747,11 @@ export function leseDateiliste(wert: unknown): OneDriveDatei[] {
     const id = ersterText(o, ['id', 'dateiId', 'itemId', 'driveItemId']);
     const dateiname = ersterText(o, ['name', 'dateiname', 'filename', 'fileName']);
     if (!id || !dateiname) continue;
+
+    // Abgebrochene Downloads sind keine Belege. Im echten Monatsordner lag ein
+    // "Nicht bestaetigt 570149.crdownload" - es waere als Kandidat mitgelaufen
+    // und haette einen Beleg wegschnappen koennen.
+    if (UNFERTIG.test(dateiname)) continue;
 
     const groesse = ersteZahl(o, ['size', 'groesse', 'sizeBytes']);
     const downloadUrl = ersterText(o, [

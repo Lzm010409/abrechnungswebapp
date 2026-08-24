@@ -1,5 +1,5 @@
 import type { OneDriveDatei } from '@abrechnung/shared';
-import { berechneAbdruck, type Abdruck } from './abdruck.js';
+import { berechneAbdruck, type Abdruck, type Belegleser } from './abdruck.js';
 
 /**
  * Beschafft die Fingerabdruecke der Dateien im Monatsordner.
@@ -34,6 +34,8 @@ export interface AbdruckSpeicher {
 export interface InhalteOptionen {
   fetchImpl?: typeof fetch;
   speicher?: AbdruckSpeicher;
+  /** Liest Belege ohne Textebene - siehe abdruck.ts. */
+  leser?: Belegleser;
   gleichzeitig?: number;
   log?: { info: (o: unknown, m?: string) => void; warn: (o: unknown, m?: string) => void };
   /** Meldet den Fortschritt: wie viele Dateien sind gelesen. */
@@ -82,7 +84,7 @@ export async function holeAbdruecke(
         }
 
         const inhalt = await lade(doFetch, datei.downloadUrl);
-        const abdruck = await berechneAbdruck(inhalt);
+        const abdruck = await berechneAbdruck(inhalt, datei.dateiname, opts.leser);
         abdruecke.set(datei.id, abdruck);
         await opts.speicher?.lege(`onedrive:${datei.id}`, datei.cTag, abdruck);
       } catch (err) {

@@ -160,3 +160,61 @@ describe('normalisiereText', () => {
     expect(normalisiereText('  Rechnung\n\n  Nr. 5  ')).toBe('rechnung nr. 5');
   });
 });
+
+describe('Belege ohne Textebene', () => {
+  it('fragt das Modell nur, wenn nichts zu lesen war', async () => {
+    const gefragt: string[] = [];
+    const leser = async (_daten: Buffer, name: string) => {
+      gefragt.push(name);
+      return { text: 'Shell Tankstelle 87,50 2026-07-13', konfidenz: 0.9 };
+    };
+
+    // Mit Textebene: das Modell bleibt aussen vor.
+    await berechneAbdruck(
+      await pdfMitText([
+        'Telekom Deutschland GmbH',
+        'Rechnungsnummer: 391617514',
+        'Endbetrag 4,38 Euro',
+      ]),
+      'rechnung.pdf',
+      leser,
+    );
+    expect(gefragt).toEqual([]);
+
+    // Ohne Textebene: gefragt wird, und das Ergebnis steht getrennt daneben.
+    const abdruck = await berechneAbdruck(
+      await pdfMitBild(testPng([200, 30, 30])),
+      'tanken-13.07.2026.pdf',
+      leser,
+    );
+
+    expect(gefragt).toEqual(['tanken-13.07.2026.pdf']);
+    expect(abdruck.gelesen?.text).toContain('87,50');
+    expect(abdruck.gelesen?.konfidenz).toBe(0.9);
+  });
+
+  it('macht aus dem Gelesenen keinen Texthash', async () => {
+    // Sonst koennten zwei verschiedene Tankquittungen denselben Hash bekommen
+    // und ueber die Beweisstufe miteinander verwechselt werden.
+    const abdruck = await berechneAbdruck(
+      await pdfMitBild(testPng([1, 2, 3])),
+      'tanken.pdf',
+      async () => ({ text: 'Shell 50,00' }),
+    );
+
+    expect(abdruck.textHash).toBeUndefined();
+    expect(abdruck.text).toBeUndefined();
+    expect(abdruck.gelesen).toBeDefined();
+  });
+
+  it('kommt damit zurecht, dass das Modell nichts erkennt', async () => {
+    const abdruck = await berechneAbdruck(
+      await pdfMitBild(testPng([1, 2, 3])),
+      'unleserlich.pdf',
+      async () => null,
+    );
+
+    expect(abdruck.gelesen).toBeUndefined();
+    expect(abdruck.sha256).toBeTruthy();
+  });
+});
