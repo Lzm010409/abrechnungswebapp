@@ -46,13 +46,19 @@ const NOCHMAL = new Set([429, 500, 502, 503, 504]);
 export interface AblageOptionen {
   /** Webhook, der zu Jahr und Monat die Ordner-ID liefert. */
   ordnerUrl?: string;
-  /** Webhook, der eine Datei in einen Unterordner legt. */
+  /**
+   * Webhook, der eine Datei hochlaedt.
+   *
+   * Wird nicht mehr verwendet: einsortiert wird ausschliesslich durch
+   * Verschieben dessen, was schon im Monatsordner liegt. Das Feld bleibt, damit
+   * eine gesetzte Umgebungsvariable den Start nicht scheitern laesst.
+   */
   ablageUrl?: string;
   /**
    * Webhook, der die Dateien eines Ordners auflistet.
    *
-   * Ohne ihn kennt die Ablage nur die Belege aus sevDesk und laedt Kopien
-   * hoch - die Originale bleiben lose im Monatsordner liegen.
+   * Ohne ihn weiss die Ablage nicht, was im Monatsordner liegt - und ohne das
+   * gibt es nichts einzusortieren.
    */
   ordnerDateienUrl?: string;
   /** Webhook, der eine vorhandene Datei in einen Unterordner verschiebt. */
@@ -94,7 +100,11 @@ export class OneDriveAblage {
 
   /** true, wenn tatsaechlich abgelegt werden kann - sonst gibt es nur Vorschau. */
   get einsatzbereit(): boolean {
-    return Boolean(this.opts.ordnerUrl && this.opts.ablageUrl);
+    // Einsortiert wird durch Verschieben. Ohne die Liste des Monatsordners gibt
+    // es nichts zu verschieben, ohne das Verschieben nuetzt die Liste nichts.
+    return Boolean(
+      this.opts.ordnerUrl && this.opts.ordnerDateienUrl && this.opts.verschiebeUrl,
+    );
   }
 
   /**
@@ -137,15 +147,15 @@ export class OneDriveAblage {
       gesamt: 1,
     });
 
-    if (nurVorschau || !this.einsatzbereit) {
+    if (!this.einsatzbereit) {
       return {
         monat: monat.monat,
         ausgefuehrt: false,
         eintraege: einteilung,
         ohneBeleg,
-        hinweis: this.einsatzbereit
-          ? undefined
-          : 'Vorschau - N8N_ORDNER_URL und N8N_ABLAGE_URL sind nicht gesetzt.',
+        hinweis:
+          'Vorschau ohne Abgleich - es fehlt mindestens eine der Adressen ' +
+          'N8N_ORDNER_URL, N8N_ORDNER_DATEIEN_URL, N8N_VERSCHIEBE_URL.',
       };
     }
 
@@ -216,33 +226,56 @@ export class OneDriveAblage {
     });
 
     this.deps.log?.info(
-      { monat: monat.monat, gefunden: vorhanden.length, ...stufen },
+      { monat: monat.monat, gefunden: vorhanden.length, belege: einteilung.length, ...stufen },
       'Abgleich mit dem Monatsordner',
     );
 
-    const erledigt: AblageEintrag[] = [];
-    for (const [i, eintrag] of zugeordnet.entries()) {
+    /*
+     * Die Vorschau macht denselben Abgleich, sie fasst nur nichts an. Vorher
+     * zeigte sie bloss die Einteilung auf Konto, Bar und Tanken - was
+     * tatsaechlich passieren wuerde, sah man erst hinterher.
+     */
+    if (nurVorschau) {
+      return {
+        monat: monat.monat,
+        ausgefuehrt: false,
+        ordnerId,
+        eintraege: zugeordnet,
+        ohneBeleg,
+        uebrig,
+        stufen,
+        ...(nichtLesbar > 0 ? { hinweis: this.hinweisZuLesefehlern(nichtLesbar, vorhanden.length) } : {}),
+      };
+    }
+
+    /*
+     * Verschoben wird, was im Monatsordner liegt - und sonst nichts.
+     *
+     * Frueher wurde ein Beleg, der sich nicht zuordnen liess, als Kopie aus
+     * sevDesk in den Unterordner geladen. Das war falsch in beide Richtungen:
+     * die Kopie liegt neben dem Original, das weiter lose herumsteht, und was
+     * aus sevDesk kommt, ist nicht zwangslaeufig ein Ausgabenbeleg. Der
+     * Monatsordner ist die Wahrheit; was dort nicht liegt, wird nicht abgelegt,
+     * sondern gemeldet.
+     */
+    const zuVerschieben = zugeordnet.filter((e) => e.aktion === 'verschieben' && e.quelle);
+    const erledigt: AblageEintrag[] = zugeordnet.filter((e) => e.aktion !== 'verschieben');
+
+    for (const [i, eintrag] of zuVerschieben.entries()) {
       melde({
         phase: 'dateien',
         schritt: 'ablegen',
-        titel: 'Belege werden abgelegt',
-        text:
-          `${eintrag.aktion === 'verschieben' ? 'verschieben' : 'hochladen'}: ` +
-          `${eintrag.dateiname} → ${eintrag.ordner}`,
+        titel: 'Belege werden einsortiert',
+        text: `${eintrag.quelle!.dateiname} → ${eintrag.ordner}`,
         erledigt: i,
-        gesamt: zugeordnet.length,
+        gesamt: zuVerschieben.length,
       });
 
       // Vor jeder Datei ausser der ersten kurz Luft holen.
       if (i > 0 && this.pauseMs > 0) await this.schlaf(this.pauseMs);
 
       try {
-        if (eintrag.aktion === 'verschieben' && eintrag.quelle) {
-          await this.verschiebeDatei(ordnerId, eintrag.ordner, eintrag.quelle.id);
-        } else {
-          const daten = await this.deps.ladeDatei(eintrag.dateiId);
-          await this.legeDateiAb(ordnerId, eintrag.ordner, eintrag.dateiname, daten);
-        }
+        await this.verschiebeDatei(ordnerId, eintrag.ordner, eintrag.quelle!.id);
         erledigt.push(eintrag);
       } catch (err) {
         const meldung = err instanceof Error ? err.message : String(err);
@@ -254,19 +287,24 @@ export class OneDriveAblage {
       }
     }
 
-    const geschafft = erledigt.filter((e) => !e.fehler).length;
+    const geschafft = erledigt.filter((e) => e.aktion === 'verschieben' && !e.fehler).length;
     melde({
       phase: 'dateien',
       schritt: 'ablegen',
-      titel: 'Belege werden abgelegt',
-      text: `${geschafft} von ${zugeordnet.length} abgelegt`,
-      erledigt: zugeordnet.length,
-      gesamt: zugeordnet.length,
+      titel: 'Belege werden einsortiert',
+      text: `${geschafft} von ${zuVerschieben.length} einsortiert`,
+      erledigt: zuVerschieben.length,
+      gesamt: zuVerschieben.length,
     });
 
     this.deps.log?.info(
-      { monat: monat.monat, anzahl: erledigt.filter((e) => !e.fehler).length },
-      'Belege in OneDrive abgelegt',
+      {
+        monat: monat.monat,
+        verschoben: geschafft,
+        offen: erledigt.filter((e) => e.aktion === 'offen').length,
+        liegengeblieben: uebrig.length,
+      },
+      'Belege in OneDrive einsortiert',
     );
 
     return {
@@ -284,16 +322,24 @@ export class OneDriveAblage {
        * ordentliches.
        */
       ...(nichtLesbar > 0
-        ? {
-            hinweis:
-              `${nichtLesbar} von ${vorhanden.length} Dateien im Monatsordner ` +
-              'liessen sich nicht lesen. Für sie entschied nur Name und Größe. ' +
-              (nichtLesbar === vorhanden.length
-                ? 'Kommt der Server nicht an OneDrive heran, taugt der Abgleich nicht.'
-                : ''),
-          }
+        ? { hinweis: this.hinweisZuLesefehlern(nichtLesbar, vorhanden.length) }
         : {}),
     };
+  }
+
+  /**
+   * Ohne den Inhalt der Dateien faellt der Abgleich auf Name und Datum zurueck
+   * - das muss dastehen, sonst sieht ein duerftiges Ergebnis aus wie ein
+   * ordentliches.
+   */
+  private hinweisZuLesefehlern(nichtLesbar: number, gesamt: number): string {
+    return (
+      `${nichtLesbar} von ${gesamt} Dateien im Monatsordner liessen sich nicht ` +
+      'lesen; für sie entschied nur der Dateiname. ' +
+      (nichtLesbar === gesamt
+        ? 'Kommt der Server nicht an OneDrive heran, taugt der Abgleich nicht.'
+        : '')
+    ).trim();
   }
 
   /**
@@ -392,16 +438,32 @@ export class OneDriveAblage {
       belege.push({ eintrag, ...(abdruck ? { abdruck } : {}) });
     }
 
-    return {
-      ...gleicheAb(
-        belege,
-        vorhanden.map((datei) => {
-          const abdruck = abdruecke.get(datei.id);
-          return { datei, ...(abdruck ? { abdruck } : {}) };
-        }),
-      ),
-      nichtLesbar: fehlgeschlagen.length,
-    };
+    const gegenstelle = vorhanden.map((datei) => {
+      const abdruck = abdruecke.get(datei.id);
+      return { datei, ...(abdruck ? { abdruck } : {}) };
+    });
+
+    /*
+     * Woraus der Abgleich schoepfen konnte. Ohne diese Zeile bleibt im
+     * Fehlerfall unklar, ob die Merkmale fehlten oder nur nicht zusammenpassten
+     * - beim ersten Lauf trafen von den Hash-Stufen null zu, und genau diese
+     * Unterscheidung liess sich hinterher nicht mehr treffen.
+     */
+    const zaehle = (
+      liste: Array<{ abdruck?: Abdruck }>,
+    ): { gesamt: number; ohneAbdruck: number; mitText: number; mitBildern: number } => ({
+      gesamt: liste.length,
+      ohneAbdruck: liste.filter((x) => !x.abdruck).length,
+      mitText: liste.filter((x) => x.abdruck?.textHash).length,
+      mitBildern: liste.filter((x) => (x.abdruck?.bilder.length ?? 0) > 0).length,
+    });
+
+    this.deps.log?.info(
+      { belege: zaehle(belege), monatsordner: zaehle(gegenstelle) },
+      'Merkmale, die dem Abgleich zur Verfuegung standen',
+    );
+
+    return { ...gleicheAb(belege, gegenstelle), nichtLesbar: fehlgeschlagen.length };
   }
 
   private async teileEin(monat: Monat): Promise<AblageEintrag[]> {
@@ -428,7 +490,18 @@ export class OneDriveAblage {
           dateiId: datei.id,
           dateiname: datei.dateiname,
           groesse: datei.groesse,
-          betrag: position.betrag,
+          buchung: {
+            datum: position.datum,
+            betrag: position.betrag,
+            ...(position.verwendungszweck ? { verwendungszweck: position.verwendungszweck } : {}),
+            ...(position.gegenkonto ? { gegenkonto: position.gegenkonto } : {}),
+            ...(position.extraktion?.aussteller
+              ? { aussteller: position.extraktion.aussteller }
+              : {}),
+            ...(position.extraktion?.belegdatum
+              ? { belegdatum: position.extraktion.belegdatum }
+              : {}),
+          },
           ordner,
           begruendung: vonHand
             ? 'an der Buchung von Hand gesetzt'
@@ -497,7 +570,7 @@ export class OneDriveAblage {
     } catch (err) {
       this.deps.log?.warn(
         { err: err instanceof Error ? err.message : String(err) },
-        'Monatsordner liess sich nicht auflisten - es wird hochgeladen statt verschoben',
+        'Monatsordner liess sich nicht auflisten - es wird nichts einsortiert',
       );
       return [];
     }
@@ -512,30 +585,6 @@ export class OneDriveAblage {
     await this.rufe(this.opts.verschiebeUrl!, { ordnerId, unterordner, dateiId });
   }
 
-  private async legeDateiAb(
-    ordnerId: string,
-    unterordner: Ablageordner,
-    dateiname: string,
-    daten: Buffer,
-  ): Promise<void> {
-    await this.rufe(this.opts.ablageUrl!, {
-      ordnerId,
-      unterordner,
-      dateiname,
-      inhalt: daten.toString('base64'),
-    });
-  }
-
-  /**
-   * Ein Aufruf an n8n, mit Wiederholung bei Ueberlast.
-   *
-   * Wiederholt wird nur, was voruebergehend sein kann: 429 und die
-   * 5xx-Antworten, dazu Verbindungsfehler. Ein 400 oder 404 kommt beim zweiten
-   * Versuch genauso zurueck - das waere nur zusaetzliche Last.
-   *
-   * Bittet n8n per `Retry-After` um eine bestimmte Wartezeit, gilt die; sonst
-   * wird die Wartezeit von Versuch zu Versuch verdoppelt.
-   */
   private async rufe(url: string, koerper: unknown): Promise<unknown> {
     const kopf: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.opts.authHeader && this.opts.authValue) {
@@ -642,10 +691,14 @@ function beschreibeAbgleich(
   uebrig: number,
 ): string {
   if (gefunden === 0) {
-    return 'keine vorhandenen Dateien gefunden - es wird hochgeladen';
+    return 'keine Dateien im Monatsordner gefunden';
   }
   const verschoben = zugeordnet.filter((e) => e.aktion === 'verschieben').length;
-  return `${verschoben} verschieben, ${zugeordnet.length - verschoben} hochladen, ${uebrig} bleibt liegen`;
+  const offen = zugeordnet.length - verschoben;
+  return (
+    `${verschoben} einsortieren, ${offen} ohne Datei im Ordner, ` +
+    `${uebrig} Datei(en) ohne Buchung`
+  );
 }
 
 /**

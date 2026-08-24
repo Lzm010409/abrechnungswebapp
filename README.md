@@ -108,10 +108,10 @@ ausschließlich für die Arbeit auf dem eigenen Rechner gedacht.
 | `ENTRA_REDIRECT_URI` | nein | wird aus der aufgerufenen Adresse gebildet |
 | `SEVDESK_CHECK_ACCOUNT_ID` | nein | Bankkonto wird beim Start automatisch ermittelt |
 | `N8N_FIND_RECHNUNG_URL` | nein | Ausgangsrechnungen kommen aus sevDesk statt als Original aus OneDrive |
-| `N8N_ORDNER_URL` | nein | Belegablage bleibt bei der Vorschau, es wird nichts nach OneDrive geschrieben |
-| `N8N_ABLAGE_URL` | nein | dito — beide Adressen müssen gesetzt sein |
-| `N8N_ORDNER_DATEIEN_URL` | nein | Belege werden als sevDesk-Kopie hochgeladen statt verschoben |
-| `N8N_VERSCHIEBE_URL` | nein | dito — beide Adressen müssen gesetzt sein |
+| `N8N_ORDNER_URL` | nein | Belegablage bleibt bei der Vorschau, es wird nichts einsortiert |
+| `N8N_ORDNER_DATEIEN_URL` | nein | dito — der Monatsordner lässt sich nicht lesen |
+| `N8N_VERSCHIEBE_URL` | nein | dito — alle drei Adressen müssen gesetzt sein |
+| `N8N_ABLAGE_URL` | nein | wird nicht mehr benutzt; es wird nur verschoben, nie hochgeladen |
 | `N8N_ABLAGE_PAUSE_MS` | nein | 350 ms Pause zwischen zwei Dateien |
 | `N8N_ABLAGE_VERSUCHE` | nein | 4 Versuche je Aufruf bei Überlast |
 | `ANTHROPIC_API_KEY` | nein | KI-Funktionen inaktiv, Rest läuft vollständig |
@@ -234,7 +234,7 @@ trotzdem einmal *„Die KI-Antwort war länger als das eingeräumte Budget"*, is
 ein kleinerer `ANTHROPIC_EFFORT` (z. B. `medium`) das richtige Mittel: das
 Modell denkt dann kürzer und hat mehr Platz für die Antwort.
 
-#### 3. Belegablage in OneDrive — `N8N_ORDNER_URL` / `N8N_ABLAGE_URL`
+#### 3. Belegablage in OneDrive — `N8N_ORDNER_URL` / `N8N_ORDNER_DATEIEN_URL` / `N8N_VERSCHIEBE_URL`
 
 **Wofür:** die Belege eines Monats in die OneDrive-Monatsordner `Konto`, `Bar`
 und `Tanken` einsortieren — siehe [Belege nach OneDrive
@@ -248,7 +248,12 @@ werden; danach die jeweilige *Production URL* des Webhook-Knotens eintragen.
 | Variable | Workflow | ID |
 |---|---|---|
 | `N8N_ORDNER_URL` | Find Ausgabenordner für Jahr und Monat | `FfLNDgPrXdV6lJe3` |
-| `N8N_ABLAGE_URL` | Zuordnung der Dateien in die Ordner | `oaYHe4LgfsYWBK3j` |
+| `N8N_ORDNER_DATEIEN_URL` | Dateien im Ausgabenordner auflisten | `36PpOH5G9eeR3Nrk` |
+| `N8N_VERSCHIEBE_URL` | Beleg in Unterordner verschieben | `1MhUDMaKTRmjA90T` |
+
+`N8N_ABLAGE_URL` (Workflow `oaYHe4LgfsYWBK3j`) wird **nicht mehr gebraucht**:
+einsortiert wird ausschließlich durch Verschieben dessen, was schon im
+Monatsordner liegt.
 
 Die Ordnersuche bekommt eine **Liste mit einem Eintrag**, Jahr vierstellig,
 Monat zweistellig; aus der Antwort wird die erste Zeichenkette genommen, die
@@ -313,54 +318,68 @@ werden `id`/`itemId`/`driveItemId`, `name`/`filename`, `size`, dazu `cTag` und
 übersprungen, damit kein Ordner in sich selbst wandert. Die OneDrive-Antwort
 passt also unverändert — **sie muss aber vollständig durchgereicht werden**:
 ohne `@microsoft.graph.downloadUrl` kommt der Abgleich nicht an den Inhalt und
-fällt auf Name und Größe zurück.
+fällt auf den Dateinamen zurück.
 
 ### Wie der Abgleich entscheidet
 
-Name und Größe genügen nicht. sevDesk nennt jeden Beleg `beleg-<voucherId>.pdf`,
-während in OneDrive der Name des Lieferanten steht — und Größen wiederholen
-sich: in einem geprüften Monatsordner lagen vier verschiedene Rechnungen mit
-exakt 95 370 Bytes. Von 67 Dateien wurde deshalb genau eine zugeordnet.
+Es wird **nur verschoben, nie hochgeladen**. Der Monatsordner ist die Wahrheit:
+was dort liegt, wird einsortiert; was dort fehlt, wird gemeldet. Eine Kopie aus
+sevDesk danebenzulegen wäre in beide Richtungen falsch — sie läge neben dem
+Original, das weiter lose herumsteht, und was aus sevDesk kommt, ist nicht
+zwangsläufig ein Ausgabenbeleg.
 
-Deshalb wird jede Datei **einmal vollständig gelesen** — die aus OneDrive über
-ihre vorab beglaubigte `downloadUrl`, ohne n8n damit zu belasten — und in
-mehrere unabhängige Merkmale zerlegt. Der Abgleich läuft dann von hart nach
-weich:
+Name und Größe genügen für die Zuordnung nicht, und Hashes auch nicht. In
+OneDrive liegt die **Original-Rechnung des Lieferanten**, aus sevDesk kommt eine
+**eigene Fassung desselben Belegs** — gemeinsam haben sie weder Bytes noch
+Bilder noch Textebene. Beim ersten Lauf gegen einen echten Monat traf deshalb
+keine einzige Hash-Stufe zu.
 
-| Stufe | Merkmal | Trägt bei |
-|---|---|---|
-| `bytes` | SHA-256 der Rohbytes | sevDesk gibt die Datei unverändert zurück — der Normalfall bei einseitigen Belegen |
-| `bilder` | Hashes der eingebetteten Bildströme | Scans, die anders verpackt, aber dasselbe Bild sind |
-| `bilder-teil` | Bildströme der Datei stecken im Beleg | sevDesk gibt gescannte Belege **seitenweise** heraus; die Anwendung setzt sie wieder zusammen, die Datei ist danach eine andere — die Bildströme überstehen das unverändert |
-| `text` | Hash der normalisierten Textebene | erzeugte Rechnungen, deren PDF neu geschrieben wurde |
-| `name` | gleicher Dateiname | was von Hand hochgeladen wurde |
-| `betrag` | Betrag der Buchung steht im Text der Datei | letzter inhaltlicher Anker |
-| `groesse` | gleiche Größe in Bytes | nur wenn sonst nichts passt |
+Der Abgleich läuft daher zweistufig.
 
-Jede Stufe nimmt **nur, was auf beiden Seiten eindeutig ist**: ein Beleg, der zu
-zwei Dateien passt, wird ebensowenig zugeordnet wie eine Datei, die zu zwei
-Belegen passt. Lieber eine Kopie hochladen als den falschen Beleg verschieben —
-eine falsch einsortierte Datei fällt niemandem auf.
+**Zuerst die Beweise.** Ist die Datei byteweise dieselbe (`bytes`), enthält sie
+dieselben eingebetteten Bildströme (`bilder`, `bilder-teil` — das überlebt das
+seitenweise Zusammensetzen aus sevDesk) oder denselben Text (`text`), ist die
+Sache entschieden. Dazu der gleiche Dateiname (`name`).
 
-Die Vorschau schreibt an jeden Beleg, welche Stufe gegriffen hat, und
-darunter eine Bilanz (*„Zugeordnet über: Datei identisch (12), gleicher Text
-(4), nur gleiche Größe (1)"*). Erst damit lässt sich beurteilen, wie belastbar
-ein Ergebnis ist.
+**Dann die Bewertung.** Für alles Übrige wird nicht verglichen, sondern bewertet
+— aus fünf unabhängigen Richtungen:
 
-Das Lesen kostet beim ersten Mal einige Sekunden je Monat. Danach nichts mehr:
-die Fingerabdrücke liegen in der Tabelle `abdruecke`. Für OneDrive-Dateien
-schlüsselt sie der `cTag`, der sich mit dem Inhalt ändert; für die eigenen
-Belege ihre `dateiId` — die *ist* der Inhalts-Hash und veraltet deshalb nie.
+| # | Verfahren | Woran es hängt | Punkte |
+|---|---|---|---|
+| 1 | **Kennung** | Rechnungs-, Kunden- oder Vertragsnummer aus dem **Verwendungszweck** der Buchung steht im Beleg. Der belastbarste Anker überhaupt — eine Lastschrift trägt die Nummer, die auch auf der Rechnung steht. | 45 |
+| 2 | **Betrag** | Der Bruttobetrag der Buchung in deutscher Schreibweise im Text; mehr, wenn er neben einem Summenfeld steht (*Rechnungsbetrag*, *Endbetrag*, *Zu zahlen*). | 30 (+12) |
+| 3 | **Lieferant** | Der Zahlungsempfänger laut Bank bzw. der Aussteller laut KI-Auswertung im Text oder im Dateinamen. Rechtsformen und Füllwörter fallen weg, damit „Vodafone West GmbH" auf „Vodafone" trifft. | 22 |
+| 4 | **Datum** | Ein Datum aus Text **oder Dateiname** im Fenster 90 Tage vor bis 5 Tage nach der Zahlung; je näher, desto mehr. Der Dateiname ist hier entscheidend: die eingescannten Belege (`tanken-13.07.2026.pdf`, `bewirtung-25.07.2026.pdf`) haben keine Textebene, tragen ihr Datum aber im Namen. | bis 18 (+10) |
+| 5 | **Zusammenspiel** | Zwei unabhängige Bestätigungen an derselben Datei. Ein Betrag findet sich schnell zweimal, ein Datum sowieso — beides zusammen praktisch nie. | +15 |
 
-Was sich nicht zuordnen lässt, wird hochgeladen wie bisher — besser eine Kopie
-als ein fehlender Beleg. Was in OneDrive übrig bleibt, steht in der Vorschau
-unter *„… ohne passende Buchung — bleiben liegen"*. Genau dort zeigt sich, wo
-der Abgleich danebenliegt oder ein Beleg in sevDesk fehlt.
+Zugeordnet wird dann **global**: das bestbewertete Paar im ganzen Monat zuerst,
+damit nicht die erste Buchung in der Liste eine Datei wegschnappt, die zu einer
+späteren viel besser passt. Genommen wird ein Paar nur, wenn es **45 Punkte**
+erreicht *und* mindestens **12 Punkte** vor dem zweitbesten noch freien
+Kandidaten derselben Buchung liegt.
+
+Das ist die eigentliche Änderung gegenüber vorher: früher galt „bei jeder
+Mehrdeutigkeit gar nichts", und zwei Dateien mit demselben Betrag ließen die
+Zuordnung scheitern, obwohl nur eine davon auch Lieferant und Datum traf. Jetzt
+entscheidet der Abstand.
+
+Die Vorschau schreibt an jeden Beleg, welche Stufe gegriffen hat und mit wie
+vielen Punkten — und bei den **nicht** zugeordneten, welche Datei am nächsten
+lag und warum es nicht gereicht hat. Erst damit lässt sich beurteilen, wo
+nachzubessern ist.
+
+Das Lesen der Dateien kostet beim ersten Mal einige Sekunden je Monat. Danach
+nichts mehr: die Fingerabdrücke liegen in der Tabelle `abdruecke`. Für
+OneDrive-Dateien schlüsselt sie der `cTag`, der sich mit dem Inhalt ändert; für
+die eigenen Belege ihre `dateiId` — die *ist* der Inhalts-Hash und veraltet nie.
+
+Was in OneDrive übrig bleibt, steht in der Vorschau unter *„… ohne passende
+Buchung — bleiben liegen"*. Genau dort zeigt sich, wo der Abgleich danebenliegt
+oder ein Beleg in sevDesk fehlt.
 
 > Kommt der Server nicht an `*.sharepoint.com` heran, sind die Inhalte nicht zu
-> holen und es bleibt bei Name und Größe. Die Vorschau sagt das dann
-> ausdrücklich — ein dürftiges Ergebnis soll nicht wie ein ordentliches
-> aussehen.
+> holen und es bleibt beim Dateinamen. Die Vorschau sagt das dann ausdrücklich —
+> ein dürftiges Ergebnis soll nicht wie ein ordentliches aussehen.
 
 Sind die beiden Variablen nicht gesetzt, wird der Monatsordner gar nicht erst
 gelesen und alles läuft wie zuvor.
@@ -619,7 +638,7 @@ Werte stehen in `packages/server/src/ai/client.ts` unter `BUDGET`.
 npm test
 ```
 
-404 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
+417 Tests. Der Schwerpunkt liegt auf `e2e.test.ts`: dort läuft die echte
 Anwendung (`baueApp`) gegen einen lokalen Nachbau der sevDesk-API und des
 n8n-Webhooks, sodass die gesamte Kette geprüft wird —
 
@@ -765,12 +784,11 @@ wurde und was er geantwortet hat**. Nur „kein Ausgabenordner gefunden" ließ
 offen, ob der Workflow nichts fand, gar nicht aktiviert ist oder bloß anders
 antwortet als erwartet.
 
-Geschrieben wird über zwei n8n-Workflows: **Find Ausgabenordner für Jahr und
+Geschrieben wird über drei n8n-Workflows: **Find Ausgabenordner für Jahr und
 Monat** (`FfLNDgPrXdV6lJe3`) liefert zu `[{ jahr, monat }]` die Ordner-ID,
-**Zuordnung der Dateien in die Ordner** (`oaYHe4LgfsYWBK3j`) legt je Aufruf eine
-Datei ab. Beide Adressen werden über `N8N_ORDNER_URL` und `N8N_ABLAGE_URL`
-gesetzt — Aufrufformat und Einrichtung stehen unter [Belegablage in
-OneDrive](#3-belegablage-in-onedrive--n8n_ordner_url--n8n_ablage_url).
+**Dateien im Ausgabenordner auflisten** (`36PpOH5G9eeR3Nrk`) den Inhalt des
+Monatsordners, und **Beleg in Unterordner verschieben** (`1MhUDMaKTRmjA90T`)
+sortiert je Aufruf eine Datei ein. Hochgeladen wird nichts.
 
 ---
 

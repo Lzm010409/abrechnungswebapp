@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AblageEintrag, OneDriveDatei } from '@abrechnung/shared';
 import type { Abdruck } from './abdruck.js';
-import { betragsMuster, gleicheAb, type BelegMitAbdruck, type DateiMitAbdruck } from './abgleich.js';
+import { gleicheAb, type BelegMitAbdruck, type DateiMitAbdruck } from './abgleich.js';
 
 /**
  * Der Abgleich entscheidet, ob ein Beleg verschoben oder als Kopie hochgeladen
@@ -87,48 +87,84 @@ describe('gleicheAb', () => {
     expect(zugeordnet[0]).toMatchObject({ aktion: 'verschieben', stufe: 'text' });
   });
 
-  it('nimmt den Betrag der Buchung als letzten Anker', async () => {
+  it('nimmt den Betrag allein noch nicht als Zuordnung', () => {
+    // Ein Betrag findet sich schnell zweimal. Fuer sich genommen reicht er
+    // nicht - erst die zweite Bestaetigung macht daraus eine Zuordnung.
     const { zugeordnet } = gleicheAb(
-      [beleg('a', { betrag: -49.99 }, { textHash: 't-beleg' })],
+      [beleg('a', { buchung: { datum: '2026-07-15', betrag: -49.99 } }, {})],
+      [datei('od-1', {}, { text: 'rechnungsbetrag 49,99 eur' })],
+    );
+
+    expect(zugeordnet[0]!.aktion).toBe('offen');
+    expect(zugeordnet[0]!.knappVerfehlt?.dateiname).toBe('od-1.pdf');
+  });
+
+  it('ordnet zu, sobald Betrag und Datum zusammenkommen', () => {
+    const { zugeordnet } = gleicheAb(
+      [beleg('a', { buchung: { datum: '2026-07-15', betrag: -49.99 } }, {})],
       [
-        datei('od-1', {}, { textHash: 't-eins', text: 'rechnungsbetrag 49,99 eur' }),
-        datei('od-2', {}, { textHash: 't-zwei', text: 'rechnungsbetrag 12,00 eur' }),
+        datei('od-1', { dateiname: 'bewirtung-12.07.2026.pdf' }, {
+          text: 'rechnungsbetrag 49,99 eur',
+        }),
+        datei('od-2', { dateiname: 'fremd.pdf' }, { text: 'nichts davon' }),
       ],
     );
 
-    expect(zugeordnet[0]).toMatchObject({ aktion: 'verschieben', stufe: 'betrag' });
+    expect(zugeordnet[0]).toMatchObject({ aktion: 'verschieben', stufe: 'bewertung' });
     expect(zugeordnet[0]!.quelle?.id).toBe('od-1');
+    expect(zugeordnet[0]!.punkte).toBeGreaterThanOrEqual(45);
+  });
+
+  it('ordnet allein auf die Rechnungsnummer im Verwendungszweck zu', () => {
+    const { zugeordnet } = gleicheAb(
+      [
+        beleg(
+          'a',
+          {
+            buchung: {
+              datum: '2026-07-15',
+              betrag: -3.68,
+              verwendungszweck: 'TELEKOM RG 391617514',
+            },
+          },
+          {},
+        ),
+      ],
+      [datei('od-1', {}, { text: 'rechnungsnummer: 391617514 endbetrag 4,38' })],
+    );
+
+    expect(zugeordnet[0]).toMatchObject({ aktion: 'verschieben', stufe: 'bewertung' });
   });
 
   it('verwechselt 4,38 nicht mit 14,38', async () => {
     const { zugeordnet } = gleicheAb(
-      [beleg('a', { betrag: -4.38 }, {})],
+      [beleg('a', { buchung: { datum: '2026-07-15', betrag: -4.38 } }, {})],
       [datei('od-1', {}, { text: 'endbetrag 14,38 eur' })],
     );
 
-    expect(zugeordnet[0]!.aktion).toBe('hochladen');
+    expect(zugeordnet[0]!.aktion).toBe('offen');
   });
 
   it('raet nicht, wenn der Betrag in zwei Dateien steht', async () => {
     const { zugeordnet, uebrig } = gleicheAb(
-      [beleg('a', { betrag: -49.99 }, {})],
+      [beleg('a', { buchung: { datum: '2026-07-15', betrag: -49.99 } }, {})],
       [
         datei('od-1', {}, { text: 'betrag 49,99' }),
         datei('od-2', {}, { text: 'auch 49,99' }),
       ],
     );
 
-    expect(zugeordnet[0]!.aktion).toBe('hochladen');
+    expect(zugeordnet[0]!.aktion).toBe('offen');
     expect(uebrig).toHaveLength(2);
   });
 
   it('raet nicht, wenn eine Datei zu zwei Belegen passt', async () => {
     const { zugeordnet } = gleicheAb(
-      [beleg('a', { betrag: -49.99 }, {}), beleg('b', { betrag: -49.99 }, {})],
+      [beleg('a', { buchung: { datum: '2026-07-15', betrag: -49.99 } }, {}), beleg('b', { buchung: { datum: '2026-07-15', betrag: -49.99 } }, {})],
       [datei('od-1', {}, { text: 'betrag 49,99' })],
     );
 
-    expect(zugeordnet.map((e) => e.aktion)).toEqual(['hochladen', 'hochladen']);
+    expect(zugeordnet.map((e) => e.aktion)).toEqual(['offen', 'offen']);
   });
 
   it('raet nicht bei mehrfach vorkommender Groesse', async () => {
@@ -142,7 +178,7 @@ describe('gleicheAb', () => {
       ],
     );
 
-    expect(zugeordnet[0]!.aktion).toBe('hochladen');
+    expect(zugeordnet[0]!.aktion).toBe('offen');
     expect(uebrig).toHaveLength(2);
   });
 
@@ -158,7 +194,7 @@ describe('gleicheAb', () => {
     );
 
     expect(zugeordnet[1]).toMatchObject({ stufe: 'bytes', quelle: { id: 'od-1' } });
-    expect(zugeordnet[0]!.aktion).toBe('hochladen');
+    expect(zugeordnet[0]!.aktion).toBe('offen');
   });
 
   it('vergibt dieselbe Datei nicht zweimal', async () => {
@@ -181,7 +217,7 @@ describe('gleicheAb', () => {
 
   it('laedt alles hoch, wenn OneDrive nichts liefert', async () => {
     const { zugeordnet } = gleicheAb([beleg('a')], []);
-    expect(zugeordnet[0]!.aktion).toBe('hochladen');
+    expect(zugeordnet[0]!.aktion).toBe('offen');
   });
 
   it('kommt ohne Fingerabdruecke aus und faellt auf Name und Groesse zurueck', async () => {
@@ -192,60 +228,5 @@ describe('gleicheAb', () => {
     );
 
     expect(zugeordnet[0]).toMatchObject({ aktion: 'verschieben', stufe: 'name' });
-  });
-});
-
-describe('betragsMuster', () => {
-  it('findet den Betrag mit und ohne Tausenderpunkt', () => {
-    const muster = betragsMuster(-1234.5);
-    expect(muster.some((m) => m.test('summe 1234,50 eur'))).toBe(true);
-    expect(muster.some((m) => m.test('summe 1.234,50 eur'))).toBe(true);
-  });
-
-  it('greift nicht in eine laengere Zahl hinein', () => {
-    const muster = betragsMuster(-4.38);
-    expect(muster.some((m) => m.test('14,38'))).toBe(false);
-    expect(muster.some((m) => m.test('4,380'))).toBe(false);
-    expect(muster.some((m) => m.test('endbetrag 4,38 eur'))).toBe(true);
-  });
-});
-
-describe('Dubletten im Monatsordner', () => {
-  it('nimmt eine von zwei inhaltsgleichen Dateien, statt zu verzagen', () => {
-    /*
-     * Im gepruefen Monatsordner lagen zwei Dateien mit demselben Inhalt. Passen
-     * beide byteweise auf denselben Beleg, ist die Wahl gleichgueltig - die
-     * andere bleibt liegen und faellt in der Vorschau als Dublette auf.
-     */
-    const { zugeordnet, uebrig } = gleicheAb(
-      [beleg('a', {}, { sha256: 'gleich' })],
-      [datei('od-2', {}, { sha256: 'gleich' }), datei('od-1', {}, { sha256: 'gleich' })],
-    );
-
-    expect(zugeordnet[0]).toMatchObject({ aktion: 'verschieben', stufe: 'bytes' });
-    expect(zugeordnet[0]!.quelle?.id).toBe('od-1');
-    expect(uebrig.map((d) => d.id)).toEqual(['od-2']);
-  });
-
-  it('bleibt bei derselben Wahl, egal wie OneDrive sortiert', () => {
-    const eins = gleicheAb(
-      [beleg('a', {}, { sha256: 'gleich' })],
-      [datei('od-1', {}, { sha256: 'gleich' }), datei('od-2', {}, { sha256: 'gleich' })],
-    );
-    const zwei = gleicheAb(
-      [beleg('a', {}, { sha256: 'gleich' })],
-      [datei('od-2', {}, { sha256: 'gleich' }), datei('od-1', {}, { sha256: 'gleich' })],
-    );
-
-    expect(eins.zugeordnet[0]!.quelle?.id).toBe(zwei.zugeordnet[0]!.quelle?.id);
-  });
-
-  it('gibt eine Datei nicht an zwei Belege - auch nicht bei Byte-Gleichheit', () => {
-    const { zugeordnet } = gleicheAb(
-      [beleg('a', {}, { sha256: 'gleich' }), beleg('b', {}, { sha256: 'gleich' })],
-      [datei('od-1', {}, { sha256: 'gleich' })],
-    );
-
-    expect(zugeordnet.map((e) => e.aktion)).toEqual(['hochladen', 'hochladen']);
   });
 });

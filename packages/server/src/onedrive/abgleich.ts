@@ -1,45 +1,55 @@
 import type { AblageEintrag, OneDriveDatei } from '@abrechnung/shared';
 import type { Abdruck } from './abdruck.js';
+import { bereiteAuf, bewerte, type Bewertung } from './bewertung.js';
 
 /**
  * Abgleich der sevDesk-Belege mit den Dateien, die im Monatsordner liegen.
  *
- * Vorher entschieden Dateiname und Byte-Groesse. Beides trifft hier praktisch
- * nie: sevDesk nennt jeden Beleg "beleg-<voucherId>.pdf", in OneDrive steht der
- * Name des Lieferanten, und gleiche Groessen wiederholen sich - in einem
- * gepruefen Monatsordner lagen vier verschiedene Rechnungen mit exakt 95370
- * Bytes. Von 67 Dateien wurde deshalb genau eine zugeordnet.
+ * Zwei Teile, in dieser Reihenfolge:
  *
- * Jetzt entscheidet der Inhalt, in mehreren Stufen von hart nach weich. Jede
- * Stufe nimmt nur, was auf BEIDEN Seiten eindeutig ist: ein Beleg, der zu zwei
- * Dateien passt, wird ebensowenig zugeordnet wie eine Datei, die zu zwei
- * Belegen passt. Lieber eine Kopie hochladen als den falschen Beleg
- * verschieben - eine falsch einsortierte Datei faellt niemandem auf.
+ *   1. **Beweise.** Ist die Datei byteweise dieselbe, enthaelt sie dieselben
+ *      Bildstroeme oder denselben Text, ist die Sache entschieden.
+ *
+ *   2. **Indizien.** Fuer alles Uebrige wird bewertet statt verglichen - siehe
+ *      bewertung.ts. Zugeordnet wird das global beste Paar, aber nur wenn es
+ *      eine Schwelle ueberschreitet UND deutlich vor dem zweitbesten liegt.
+ *
+ * Warum der zweite Teil das Entscheidende ist: in einem echten Monatsordner
+ * griff von den Beweisen kein einziger. Die Datei in OneDrive ist die
+ * Original-Rechnung des Lieferanten, die aus sevDesk eine eigene Fassung
+ * desselben Belegs - gemeinsam haben sie nur, was drauf steht.
+ *
+ * Der frueher entscheidende Punkt "bei Mehrdeutigkeit gar nichts" war zu
+ * streng: zwei Dateien mit demselben Betrag liessen die Zuordnung scheitern,
+ * obwohl nur eine davon auch den Lieferanten und das Datum traf. Jetzt
+ * entscheidet der Abstand.
  */
 
-/** Stufen des Abgleichs, in der Reihenfolge ihrer Anwendung. */
-export const STUFEN = [
-  'bytes',
-  'bilder',
-  'bilder-teil',
-  'text',
-  'name',
-  'betrag',
-  'groesse',
-] as const;
+/** Beweisstufen, in der Reihenfolge ihrer Anwendung. */
+export const BEWEISE = ['bytes', 'bilder', 'bilder-teil', 'text', 'name'] as const;
+export type Beweis = (typeof BEWEISE)[number];
 
-export type Stufe = (typeof STUFEN)[number];
+export type Stufe = Beweis | 'bewertung';
 
-/** Was in der Oberflaeche zu einer Stufe steht. */
 export const STUFENTEXT: Record<Stufe, string> = {
   bytes: 'Datei ist Byte für Byte dieselbe',
   bilder: 'dieselben eingebetteten Bilder',
   'bilder-teil': 'Bilder der Datei stecken im Beleg',
   text: 'derselbe Text',
   name: 'gleicher Dateiname',
-  betrag: 'Betrag der Buchung steht im Text',
-  groesse: 'gleiche Größe, sonst nichts Passendes',
+  bewertung: 'inhaltlich zugeordnet',
 };
+
+/**
+ * Ab hier gilt eine Zuordnung als belastbar, und so weit muss sie vor der
+ * zweitbesten liegen.
+ *
+ * Die Schwelle liegt bewusst ueber dem, was ein einzelnes Verfahren liefern
+ * kann - ausser der Kennung aus dem Verwendungszweck, die fuer sich genommen
+ * schon ein starker Anker ist. Alles andere braucht eine zweite Bestaetigung.
+ */
+export const SCHWELLE = 45;
+export const ABSTAND = 12;
 
 export interface BelegMitAbdruck {
   eintrag: AblageEintrag;
@@ -54,7 +64,6 @@ export interface DateiMitAbdruck {
 export interface AbgleichErgebnis {
   zugeordnet: AblageEintrag[];
   uebrig: OneDriveDatei[];
-  /** Wie viele Zuordnungen je Stufe zustande kamen - fuer Anzeige und Log. */
   stufen: Record<Stufe, number>;
 }
 
@@ -74,39 +83,19 @@ function istTeilmenge(teil: string[], ganz: string[]): boolean {
   return teil.every((h) => menge.has(h));
 }
 
-/**
- * Der Betrag einer Buchung in deutscher Schreibweise, mit und ohne
- * Tausenderpunkt - im Text steht mal "1.234,56", mal "1234,56".
- */
-export function betragsMuster(betrag: number): RegExp[] {
-  const wert = Math.abs(betrag).toFixed(2).replace('.', ',');
-  const mitPunkt = wert.replace(/\B(?=(\d{3})+(?!\d)(?=,))/g, '.');
-  const formen = mitPunkt === wert ? [wert] : [wert, mitPunkt];
-
-  // Ziffernraender pruefen, sonst faende "4,38" auch in "14,38" einen Treffer.
-  return formen.map(
-    (form) => new RegExp(`(?<![\\d.,])${form.replace(/[.]/g, '\\.')}(?![\\d,])`),
-  );
-}
-
-/**
- * Eine Stufe: liefert zu jedem Beleg die Dateien, die sie fuer passend haelt.
- * Zugeordnet wird daraus nur, was auf beiden Seiten eindeutig ist.
- */
 type Pruefung = (beleg: BelegMitAbdruck, datei: DateiMitAbdruck) => boolean;
 
 /**
- * Stufen, bei denen mehrere Kandidaten kein Hindernis sind.
+ * Beweisstufen, bei denen mehrere Kandidaten kein Hindernis sind.
  *
  * Nur bei `bytes`: passen zwei Dateien byteweise auf denselben Beleg, sind sie
  * auch untereinander identisch - im gepruefen Monatsordner lagen tatsaechlich
  * zwei inhaltsgleiche Dateien. Welche davon verschoben wird, macht keinen
- * Unterschied; die andere bleibt liegen und faellt in der Vorschau als Dublette
- * auf. Ueberall sonst waeren mehrere Kandidaten echte Unsicherheit.
+ * Unterschied; die andere bleibt liegen und faellt als Dublette auf.
  */
-const UNTEREINANDER_GLEICH = new Set<Stufe>(['bytes']);
+const UNTEREINANDER_GLEICH = new Set<Beweis>(['bytes']);
 
-const PRUEFUNGEN: Record<Stufe, Pruefung> = {
+const PRUEFUNGEN: Record<Beweis, Pruefung> = {
   bytes: (b, d) => Boolean(b.abdruck && d.abdruck && b.abdruck.sha256 === d.abdruck.sha256),
 
   bilder: (b, d) =>
@@ -119,21 +108,11 @@ const PRUEFUNGEN: Record<Stufe, Pruefung> = {
     Boolean(b.abdruck && d.abdruck && istTeilmenge(d.abdruck.bilder, b.abdruck.bilder)),
 
   text: (b, d) =>
-    Boolean(b.abdruck?.textHash && d.abdruck?.textHash && b.abdruck.textHash === d.abdruck.textHash),
+    Boolean(
+      b.abdruck?.textHash && d.abdruck?.textHash && b.abdruck.textHash === d.abdruck.textHash,
+    ),
 
   name: (b, d) => normalisiere(b.eintrag.dateiname) === normalisiere(d.datei.dateiname),
-
-  // Letzter inhaltlicher Anker: der Betrag der Buchung steht im Text der Datei.
-  // Fuer sich genommen schwach - deshalb ganz hinten und nur, wenn er auf
-  // beiden Seiten genau einmal vorkommt.
-  betrag: (b, d) => {
-    const betrag = b.eintrag.betrag;
-    if (betrag === undefined || !d.abdruck?.text) return false;
-    return betragsMuster(betrag).some((muster) => muster.test(d.abdruck!.text!));
-  },
-
-  groesse: (b, d) =>
-    b.eintrag.groesse !== undefined && b.eintrag.groesse === d.datei.groesse,
 };
 
 export function gleicheAb(
@@ -142,9 +121,13 @@ export function gleicheAb(
 ): AbgleichErgebnis {
   const zugeordnet = belege.map((b) => ({ ...b, eintrag: { ...b.eintrag } }));
   const frei = new Map(dateien.map((d) => [d.datei.id, d]));
-  const stufen = Object.fromEntries(STUFEN.map((s) => [s, 0])) as Record<Stufe, number>;
+  const stufen = Object.fromEntries(
+    [...BEWEISE, 'bewertung'].map((s) => [s, 0]),
+  ) as Record<Stufe, number>;
 
-  for (const stufe of STUFEN) {
+  // -- Teil 1: Beweise ------------------------------------------------------
+
+  for (const stufe of BEWEISE) {
     const pruefe = PRUEFUNGEN[stufe];
     const offen = zugeordnet.filter((b) => !b.eintrag.aktion);
 
@@ -162,8 +145,6 @@ export function gleicheAb(
     }
 
     for (const [beleg, passend] of kandidaten) {
-      // Mehrere Dateien auf einen Beleg: nur hinnehmbar, wenn sie ohnehin
-      // dasselbe sind. Sonst wird nicht geraten.
       if (passend.length !== 1 && !UNTEREINANDER_GLEICH.has(stufe)) continue;
 
       // Der Reihenfolge wegen: dasselbe Ergebnis, egal wie OneDrive sortiert.
@@ -185,8 +166,95 @@ export function gleicheAb(
     }
   }
 
+  // -- Teil 2: Bewertung ----------------------------------------------------
+
+  const offen = zugeordnet.filter((b) => !b.eintrag.aktion);
+  const paare: Array<{ beleg: BelegMitAbdruck; datei: DateiMitAbdruck; bewertung: Bewertung }> = [];
+
+  // Einmal je Datei aufbereiten, nicht je Paar - sonst laeuft derselbe
+  // Rechnungstext bei sechzig Buchungen sechzigmal durch.
+  const aufbereitet = new Map(
+    [...frei.values()].map((d) => [d.datei.id, bereiteAuf(d.datei, d.abdruck)]),
+  );
+
+  for (const beleg of offen) {
+    for (const datei of frei.values()) {
+      const bewertung = bewerte(beleg.eintrag, aufbereitet.get(datei.datei.id)!);
+      if (bewertung.punkte > 0) paare.push({ beleg, datei, bewertung });
+    }
+  }
+
+  /*
+   * Absteigend nach Punkten vergeben, und zwar global: das beste Paar im
+   * ganzen Monat zuerst. Sonst schnappt die erste Buchung in der Liste eine
+   * Datei weg, die zu einer spaeteren viel besser passt.
+   */
+  paare.sort(
+    (a, b) =>
+      b.bewertung.punkte - a.bewertung.punkte ||
+      a.datei.datei.id.localeCompare(b.datei.datei.id),
+  );
+
+  const besterAndererKandidat = (
+    beleg: BelegMitAbdruck,
+    ausser: string,
+  ): { bewertung: Bewertung; dateiname: string } | undefined => {
+    for (const p of paare) {
+      if (p.beleg !== beleg) continue;
+      if (p.datei.datei.id === ausser) continue;
+      if (!frei.has(p.datei.datei.id)) continue;
+      return { bewertung: p.bewertung, dateiname: p.datei.datei.dateiname };
+    }
+    return undefined;
+  };
+
+  for (const { beleg, datei, bewertung } of paare) {
+    if (beleg.eintrag.aktion) continue;
+    if (!frei.has(datei.datei.id)) continue;
+    if (bewertung.punkte < SCHWELLE) continue;
+
+    // Der zweitbeste noch freie Kandidat derselben Buchung muss deutlich
+    // zurueckliegen - sonst ist es Raten mit Punkten.
+    const zweiter = besterAndererKandidat(beleg, datei.datei.id);
+    if (zweiter && bewertung.punkte - zweiter.bewertung.punkte < ABSTAND) {
+      beleg.eintrag.knappVerfehlt = {
+        dateiname: datei.datei.dateiname,
+        punkte: bewertung.punkte,
+        grund: `nicht eindeutig, "${zweiter.dateiname}" passt fast genauso gut`,
+      };
+      continue;
+    }
+
+    frei.delete(datei.datei.id);
+    Object.assign(beleg.eintrag, {
+      aktion: 'verschieben' as const,
+      quelle: datei.datei,
+      abgleich: bewertung.grund,
+      stufe: 'bewertung',
+      punkte: bewertung.punkte,
+    });
+    delete beleg.eintrag.knappVerfehlt;
+    stufen.bewertung++;
+  }
+
+  // -- Rest -----------------------------------------------------------------
+
   for (const beleg of zugeordnet) {
-    if (!beleg.eintrag.aktion) beleg.eintrag.aktion = 'hochladen';
+    if (beleg.eintrag.aktion) continue;
+    beleg.eintrag.aktion = 'offen';
+
+    // Was der Abgleich beinahe genommen haette, gehoert in die Anzeige. Nur
+    // daran laesst sich erkennen, ob er knapp danebenlag oder weit weg war.
+    if (!beleg.eintrag.knappVerfehlt) {
+      const bester = paare.find((p) => p.beleg === beleg);
+      if (bester) {
+        beleg.eintrag.knappVerfehlt = {
+          dateiname: bester.datei.datei.dateiname,
+          punkte: bester.bewertung.punkte,
+          grund: bester.bewertung.grund,
+        };
+      }
+    }
   }
 
   return {

@@ -40,8 +40,7 @@ const STUFENNAME: Record<string, string> = {
   'bilder-teil': 'Bild im Beleg enthalten',
   text: 'gleicher Text',
   name: 'gleicher Name',
-  betrag: 'Betrag im Text',
-  groesse: 'nur gleiche Größe',
+  bewertung: 'inhaltlich zugeordnet',
 };
 
 function Stufenbilanz({ stufen }: { stufen: Record<string, number> }) {
@@ -89,11 +88,11 @@ export function Ablagevorschau({ ergebnis, onAusfuehren, onSchliessen, laedt }: 
                         className={`marke aktion ${e.aktion}`}
                         title={
                           e.aktion === 'verschieben'
-                            ? 'Die Datei liegt schon in OneDrive und wird nur einsortiert'
-                            : 'In OneDrive nicht gefunden – wird aus sevDesk hochgeladen'
+                            ? 'Die Datei liegt im Monatsordner und wird einsortiert'
+                            : 'Im Monatsordner ist keine passende Datei gefunden worden'
                         }
                       >
-                        {e.aktion === 'verschieben' ? 'verschieben' : 'hochladen'}
+                        {e.aktion === 'verschieben' ? 'einsortieren' : 'keine Datei'}
                       </span>
                     )}
                     <span title={e.begruendung}>{e.quelle?.dateiname ?? e.dateiname}</span>
@@ -103,7 +102,26 @@ export function Ablagevorschau({ ergebnis, onAusfuehren, onSchliessen, laedt }: 
                       ob nur die Groesse passte, ist der Unterschied zwischen
                       "stimmt" und "vermutlich".
                     */}
-                    {e.abgleich && <span className="grau klein"> · {e.abgleich}</span>}
+                    {e.abgleich && (
+                      <span className="grau klein">
+                        {' · '}
+                        {e.abgleich}
+                        {e.punkte !== undefined && ` (${e.punkte})`}
+                      </span>
+                    )}
+                    {/*
+                      Bei den nicht zugeordneten Buchungen steht, was der
+                      Abgleich beinahe genommen haette. Ohne diese Zeile bleibt
+                      offen, ob er knapp danebenlag oder weit weg war - und
+                      genau das entscheidet, wo man nachbessert.
+                    */}
+                    {e.aktion === 'offen' && e.knappVerfehlt && (
+                      <span className="grau klein">
+                        {' · nächstliegend: '}
+                        {e.knappVerfehlt.dateiname} ({e.knappVerfehlt.punkte}) —{' '}
+                        {e.knappVerfehlt.grund}
+                      </span>
+                    )}
                     {e.vonHand && <span className="grau klein"> · von Hand</span>}
                     {e.fehler && <span className="klein"> — {e.fehler}</span>}
                   </li>
@@ -147,7 +165,8 @@ export function Ablagevorschau({ ergebnis, onAusfuehren, onSchliessen, laedt }: 
 
       {!ergebnis.ausgefuehrt && onAusfuehren && (
         <button className="primaer" disabled={laedt} onClick={onAusfuehren}>
-          {ergebnis.eintraege.length} Belege jetzt in OneDrive ablegen
+          {ergebnis.eintraege.filter((e) => e.aktion === 'verschieben').length} Belege jetzt
+          einsortieren
         </button>
       )}
     </section>

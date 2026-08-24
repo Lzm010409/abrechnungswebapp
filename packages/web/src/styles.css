@@ -525,6 +525,8 @@ code { background: #f1f3f5; padding: 1px 4px; border-radius: 3px; font-size: 12p
 .marke.aktion { margin: 0 6px 0 0; }
 .marke.aktion.verschieben { background: #e6f4ea; color: #1e7b34; }
 .marke.aktion.hochladen { background: #fdf0d5; color: #8a6100; }
+/* Ohne passende Datei im Monatsordner - das bleibt liegen und will gesehen werden. */
+.marke.aktion.offen { background: #fdf0d5; color: #8a6100; }
 
 .ablage .uebrig { margin: 8px 0; }
 .ablage .uebrig summary { cursor: pointer; }

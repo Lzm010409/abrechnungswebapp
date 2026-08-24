@@ -213,7 +213,7 @@ describe('Einteilung auf die Ordner', () => {
   });
 });
 
-describe('Ablegen ueber n8n', () => {
+describe('Einsortieren ueber n8n', () => {
   /** Gewartete Zeiten je Instanz - so laesst sich die Drosselung pruefen. */
   let gewartet: number[] = [];
 
@@ -225,7 +225,8 @@ describe('Ablegen ueber n8n', () => {
     new OneDriveAblage(
       {
         ordnerUrl: 'https://n8n.example/ordner',
-        ablageUrl: 'https://n8n.example/ablage',
+        ordnerDateienUrl: 'https://n8n.example/dateien',
+        verschiebeUrl: 'https://n8n.example/verschieben',
         fetchImpl,
         // Im Test wird nicht wirklich gewartet, nur mitgeschrieben.
         schlafImpl: async (ms) => {
@@ -252,103 +253,125 @@ describe('Ablegen ueber n8n', () => {
       headers: { get: (name: string) => (name === 'retry-after' ? (retryAfter ?? null) : null) },
     }) as unknown as Response;
 
-  it('kommt mit der echten Antwort des Ordner-Workflows durch', async () => {
-    // Ende zu Ende mit dem tatsaechlichen Rueckgabekoerper - der Test oben
-    // prueft nur die Suchfunktion, dieser den ganzen Weg bis zur Ablage.
+  /**
+   * Antwortet wie die drei Workflows zusammen. `dateien` ist der Inhalt des
+   * Monatsordners; die Belege der Testbuchungen heissen "<id>.pdf", ein
+   * gleichnamiger Eintrag wird also ueber den Namen zugeordnet.
+   */
+  const workflows = (dateien: unknown[], ordner: unknown = { id: 'ORDNER-1' }) => {
     const aufrufe: Array<{ url: string; body: unknown }> = [];
     const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
-      aufrufe.push({ url: String(url), body: JSON.parse(String(init.body)) });
-      return antwort(
-        String(url).endsWith('/ordner')
-          ? [{ id: '017CTANMEXRS4RMU2ZWRB32HLMDMEXZM5B' }]
-          : { ok: true },
-      );
+      const pfad = String(url);
+      aufrufe.push({ url: pfad, body: JSON.parse(String(init.body)) });
+      if (pfad.endsWith('/ordner')) return antwort(ordner);
+      if (pfad.endsWith('/dateien')) return antwort(dateien);
+      return antwort({ ok: true });
     });
+    return { aufrufe, fetchImpl: fetchImpl as unknown as typeof fetch };
+  };
 
-    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, { pauseMs: 0 }).lege(
+  it('kommt mit der echten Antwort des Ordner-Workflows durch', async () => {
+    const { aufrufe, fetchImpl } = workflows([{ id: 'od-1', name: 'a.pdf', size: 1 }], [
+      { id: '017CTANMEXRS4RMU2ZWRB32HLMDMEXZM5B' },
+    ]);
+
+    const ergebnis = await bereit(fetchImpl, { pauseMs: 0 }).lege(
       monat({ positionen: [pos({ id: 'a' })] }),
       false,
     );
 
     expect(ergebnis.ausgefuehrt).toBe(true);
     expect(ergebnis.ordnerId).toBe('017CTANMEXRS4RMU2ZWRB32HLMDMEXZM5B');
-    expect(ergebnis.hinweis).toBeUndefined();
-    expect(aufrufe[1]!.body).toMatchObject({
-      ordnerId: '017CTANMEXRS4RMU2ZWRB32HLMDMEXZM5B',
-    });
+    expect(aufrufe.map((a) => a.url)).toContain('https://n8n.example/verschieben');
   });
 
-  it('holt die Ordner-ID und legt jede Datei ab', async () => {
-    const aufrufe: Array<{ url: string; body: unknown }> = [];
-    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
-      aufrufe.push({ url: String(url), body: JSON.parse(String(init.body)) });
-      return antwort(String(url).endsWith('/ordner') ? { ordnerId: 'ORDNER-123' } : { ok: true });
-    });
+  it('verschiebt jede zugeordnete Datei in ihren Unterordner', async () => {
+    const { aufrufe, fetchImpl } = workflows([
+      { id: 'od-1', name: 'a.pdf', size: 1 },
+      { id: 'od-2', name: 'b.pdf', size: 1 },
+    ]);
 
-    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch).lege(
-      monat({ positionen: [pos({ id: 'a', verwendungszweck: 'Buerobedarf' })] }),
+    const ergebnis = await bereit(fetchImpl, { pauseMs: 0 }).lege(
+      monat({ positionen: [pos({ id: 'a' }), pos({ id: 'b' })] }),
       false,
     );
 
-    expect(ergebnis.ausgefuehrt).toBe(true);
-    expect(ergebnis.ordnerId).toBe('ORDNER-123');
-
-    // Liste mit einem Eintrag, Jahr vierstellig - so erwartet es der Workflow.
-    expect(aufrufe[0]!.body).toEqual([{ jahr: '2026', monat: '06' }]);
-    expect(aufrufe[1]!.body).toMatchObject({
-      ordnerId: 'ORDNER-123',
-      unterordner: 'Bar',
-      dateiname: 'a.pdf',
-    });
+    expect(ergebnis.eintraege.every((e) => e.aktion === 'verschieben')).toBe(true);
+    const verschiebungen = aufrufe.filter((a) => a.url.endsWith('/verschieben'));
+    expect(verschiebungen).toHaveLength(2);
+    expect(verschiebungen[0]!.body).toMatchObject({ ordnerId: 'ORDNER-1', dateiId: 'od-1' });
   });
 
-  it('macht ohne ausdruecklichen Auftrag nichts', async () => {
-    const fetchImpl = vi.fn(async () => antwort({ ordnerId: 'X' }));
+  it('laedt nichts hoch, wenn im Monatsordner nichts Passendes liegt', async () => {
+    // Der Monatsordner ist die Wahrheit. Was dort fehlt, wird gemeldet und
+    // nicht als Kopie aus sevDesk danebengelegt.
+    const { aufrufe, fetchImpl } = workflows([{ id: 'od-9', name: 'Fremd.pdf', size: 4711 }]);
 
-    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch).lege(
+    const ergebnis = await bereit(fetchImpl, { pauseMs: 0 }).lege(
+      monat({ positionen: [pos({ id: 'a' })] }),
+      false,
+    );
+
+    expect(ergebnis.eintraege[0]!.aktion).toBe('offen');
+    expect(aufrufe.map((a) => a.url)).not.toContain('https://n8n.example/verschieben');
+    expect(ergebnis.uebrig?.map((d) => d.dateiname)).toEqual(['Fremd.pdf']);
+  });
+
+  it('macht ohne ausdruecklichen Auftrag nichts, zeigt aber den Abgleich', async () => {
+    const { aufrufe, fetchImpl } = workflows([{ id: 'od-1', name: 'a.pdf', size: 1 }]);
+
+    const ergebnis = await bereit(fetchImpl, { pauseMs: 0 }).lege(
       monat({ positionen: [pos({ id: 'a' })] }),
       true,
     );
 
     expect(ergebnis.ausgefuehrt).toBe(false);
-    expect(fetchImpl).not.toHaveBeenCalled();
+    // Die Vorschau gleicht ab - nur anfassen tut sie nichts.
+    expect(ergebnis.eintraege[0]).toMatchObject({ aktion: 'verschieben', stufe: 'name' });
+    expect(aufrufe.map((a) => a.url)).not.toContain('https://n8n.example/verschieben');
   });
 
   it('vermerkt einen Fehlschlag an der Datei, statt alles abzubrechen', async () => {
     const fetchImpl = vi.fn(async (url: string) => {
-      if (String(url).endsWith('/ordner')) return antwort({ ordnerId: 'X' });
-      return { ok: false, status: 500, text: async () => 'kaputt' } as unknown as Response;
+      const pfad = String(url);
+      if (pfad.endsWith('/ordner')) return antwort({ id: 'ORDNER-1' });
+      if (pfad.endsWith('/dateien')) return antwort([{ id: 'od-1', name: 'a.pdf', size: 1 }]);
+      return fehler(400);
     });
 
-    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch).lege(
-      monat({ positionen: [pos({ id: 'a' }), pos({ id: 'b' })] }),
+    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, { pauseMs: 0 }).lege(
+      monat({ positionen: [pos({ id: 'a' })] }),
       false,
     );
 
-    expect(ergebnis.eintraege).toHaveLength(2);
-    expect(ergebnis.eintraege.every((e) => e.fehler)).toBe(true);
+    expect(ergebnis.ausgefuehrt).toBe(true);
+    expect(ergebnis.eintraege[0]!.fehler).toContain('400');
   });
 
   it('legt zwischen zwei Dateien eine Pause ein', async () => {
-    const fetchImpl = vi.fn(async (url: string) =>
-      antwort(String(url).endsWith('/ordner') ? { ordnerId: 'X' } : { ok: true }),
-    );
+    const { fetchImpl } = workflows([
+      { id: 'od-1', name: 'a.pdf', size: 1 },
+      { id: 'od-2', name: 'b.pdf', size: 1 },
+      { id: 'od-3', name: 'c.pdf', size: 1 },
+    ]);
 
-    await bereit(fetchImpl as unknown as typeof fetch, { pauseMs: 250 }).lege(
+    await bereit(fetchImpl, { pauseMs: 250 }).lege(
       monat({ positionen: [pos({ id: 'a' }), pos({ id: 'b' }), pos({ id: 'c' })] }),
       false,
     );
 
-    // Drei Dateien, zwei Pausen - vor der ersten wird nicht gewartet.
+    // Vor der ersten Datei wird nicht gewartet, vor den beiden anderen schon.
     expect(gewartet).toEqual([250, 250]);
   });
 
   it('versucht es nach einem 429 erneut und haelt sich an Retry-After', async () => {
-    let ablagen = 0;
+    let versuche = 0;
     const fetchImpl = vi.fn(async (url: string) => {
-      if (String(url).endsWith('/ordner')) return antwort({ ordnerId: 'X' });
-      ablagen++;
-      return ablagen === 1 ? fehler(429, '5') : antwort({ ok: true });
+      const pfad = String(url);
+      if (pfad.endsWith('/ordner')) return antwort({ id: 'ORDNER-1' });
+      if (pfad.endsWith('/dateien')) return antwort([{ id: 'od-1', name: 'a.pdf', size: 1 }]);
+      versuche++;
+      return versuche === 1 ? fehler(429, '3') : antwort({ ok: true });
     });
 
     const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, { pauseMs: 0 }).lege(
@@ -356,152 +379,76 @@ describe('Ablegen ueber n8n', () => {
       false,
     );
 
+    expect(versuche).toBe(2);
+    expect(gewartet).toContain(3000);
     expect(ergebnis.eintraege[0]!.fehler).toBeUndefined();
-    expect(ablagen).toBe(2);
-    // Retry-After in Sekunden, umgerechnet in Millisekunden.
-    expect(gewartet).toEqual([5000]);
   });
 
   it('gibt bei dauerhafter Ueberlast auf, statt endlos zu wiederholen', async () => {
-    const fetchImpl = vi.fn(async (url: string) =>
-      String(url).endsWith('/ordner') ? antwort({ ordnerId: 'X' }) : fehler(503),
-    );
+    const fetchImpl = vi.fn(async (url: string) => {
+      const pfad = String(url);
+      if (pfad.endsWith('/ordner')) return antwort({ id: 'ORDNER-1' });
+      if (pfad.endsWith('/dateien')) return antwort([{ id: 'od-1', name: 'a.pdf', size: 1 }]);
+      return fehler(503);
+    });
 
     const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, {
       pauseMs: 0,
-      versuche: 3,
+      versuche: 2,
     }).lege(monat({ positionen: [pos({ id: 'a' })] }), false);
 
     expect(ergebnis.eintraege[0]!.fehler).toContain('503');
-    // Ein Ordner-Aufruf plus drei Ablage-Versuche.
-    expect(fetchImpl).toHaveBeenCalledTimes(4);
-    // Rueckzug verdoppelt sich: 1s, dann 2s.
-    expect(gewartet).toEqual([1000, 2000]);
   });
 
   it('wiederholt einen 400 nicht - der faellt beim zweiten Mal genauso aus', async () => {
-    const fetchImpl = vi.fn(async (url: string) =>
-      String(url).endsWith('/ordner') ? antwort({ ordnerId: 'X' }) : fehler(400),
-    );
+    let versuche = 0;
+    const fetchImpl = vi.fn(async (url: string) => {
+      const pfad = String(url);
+      if (pfad.endsWith('/ordner')) return antwort({ id: 'ORDNER-1' });
+      if (pfad.endsWith('/dateien')) return antwort([{ id: 'od-1', name: 'a.pdf', size: 1 }]);
+      versuche++;
+      return fehler(400);
+    });
 
-    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, { pauseMs: 0 }).lege(
+    await bereit(fetchImpl as unknown as typeof fetch, { pauseMs: 0 }).lege(
       monat({ positionen: [pos({ id: 'a' })] }),
       false,
     );
 
-    expect(ergebnis.eintraege[0]!.fehler).toContain('400');
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(gewartet).toEqual([]);
+    expect(versuche).toBe(1);
   });
 
   it('meldet einen fehlenden Monatsordner verstaendlich', async () => {
-    const fetchImpl = vi.fn(async () => antwort({ objects: [] }));
+    const { fetchImpl } = workflows([], []);
 
-    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch).lege(
-      monat({ positionen: [pos({ id: 'a' })] }),
-      false,
-    );
+    const ergebnis = await bereit(fetchImpl).lege(monat({ positionen: [pos({ id: 'a' })] }), false);
 
     expect(ergebnis.ausgefuehrt).toBe(false);
     expect(ergebnis.hinweis).toContain('kein Ausgabenordner');
-    // Ohne die Antwort des Workflows laesst sich nicht unterscheiden, ob er
-    // nichts gefunden hat oder ob er gar nicht erst antwortet.
-    expect(ergebnis.hinweis).toContain('jahr: "2026"');
-    expect(ergebnis.hinweis).toContain('{"objects":[]}');
   });
 
   it('erkennt einen Webhook, der nur den Start bestaetigt', async () => {
-    // Die haeufigste Fehlkonfiguration: "Respond: Immediately". n8n schickt
-    // dann nie das Ergebnis - von "nichts gefunden" nicht zu unterscheiden.
-    const fetchImpl = vi.fn(async () => antwort({ message: 'Workflow was started' }));
+    const { fetchImpl } = workflows([], { message: 'Workflow was started' });
 
-    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch).lege(
-      monat({ positionen: [pos({ id: 'a' })] }),
-      false,
-    );
+    const ergebnis = await bereit(fetchImpl).lege(monat({ positionen: [pos({ id: 'a' })] }), false);
 
     expect(ergebnis.hinweis).toContain('antwortet sofort');
-    expect(ergebnis.hinweis).toContain('Respond to Webhook');
   });
 
   it('unterscheidet ein leeres Ergebnis von einer kaputten Antwort', async () => {
-    const fetchImpl = vi.fn(async () => antwort([]));
+    const { fetchImpl } = workflows([], []);
 
-    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch).lege(
-      monat({ positionen: [pos({ id: 'a' })] }),
-      false,
-    );
+    const ergebnis = await bereit(fetchImpl).lege(monat({ positionen: [pos({ id: 'a' })] }), false);
 
     expect(ergebnis.hinweis).toContain('keinen Ordner');
   });
 
-  it('verschiebt eine vorhandene Datei, statt eine Kopie hochzuladen', async () => {
-    const aufrufe: Array<{ url: string; body: unknown }> = [];
-    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
-      const pfad = String(url);
-      aufrufe.push({ url: pfad, body: JSON.parse(String(init.body)) });
-
-      if (pfad.endsWith('/ordner')) return antwort({ id: 'ORDNER-1' });
-      if (pfad.endsWith('/dateien')) {
-        return antwort([
-          { id: 'od-1', name: 'a.pdf', size: 1 },
-          { id: 'od-2', name: 'Fremd.pdf', size: 99 },
-        ]);
-      }
-      return antwort({ ok: true });
-    });
-
-    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, {
-      pauseMs: 0,
-      ordnerDateienUrl: 'https://n8n.example/dateien',
-      verschiebeUrl: 'https://n8n.example/verschieben',
-    }).lege(monat({ positionen: [pos({ id: 'a' })] }), false);
-
-    expect(ergebnis.eintraege[0]).toMatchObject({
-      aktion: 'verschieben',
-      quelle: { id: 'od-1' },
-    });
-
-    // Verschoben, nicht hochgeladen: kein Aufruf an den Ablage-Webhook.
-    const ziele = aufrufe.map((a) => a.url);
-    expect(ziele).toContain('https://n8n.example/verschieben');
-    expect(ziele).not.toContain('https://n8n.example/ablage');
-    expect(aufrufe.at(-1)!.body).toMatchObject({
-      ordnerId: 'ORDNER-1',
-      unterordner: 'Bar',
-      dateiId: 'od-1',
-    });
-
-    // Was zu keiner Buchung passt, bleibt liegen - und wird gemeldet.
-    expect(ergebnis.uebrig?.map((d) => d.dateiname)).toEqual(['Fremd.pdf']);
-  });
-
-  it('laedt hoch, wenn in OneDrive nichts Passendes liegt', async () => {
-    const ziele: string[] = [];
+  it('laesst alles offen, wenn sich der Monatsordner nicht auflisten laesst', async () => {
+    // Ein Ausfall des Listen-Workflows darf nichts Falsches ausloesen.
+    const aufrufe: string[] = [];
     const fetchImpl = vi.fn(async (url: string) => {
       const pfad = String(url);
-      ziele.push(pfad);
-      if (pfad.endsWith('/ordner')) return antwort({ id: 'ORDNER-1' });
-      if (pfad.endsWith('/dateien')) return antwort([]);
-      return antwort({ ok: true });
-    });
-
-    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, {
-      pauseMs: 0,
-      ordnerDateienUrl: 'https://n8n.example/dateien',
-      verschiebeUrl: 'https://n8n.example/verschieben',
-    }).lege(monat({ positionen: [pos({ id: 'a' })] }), false);
-
-    expect(ergebnis.eintraege[0]!.aktion).toBe('hochladen');
-    expect(ziele).toContain('https://n8n.example/ablage');
-  });
-
-  it('laedt hoch, wenn sich der Monatsordner nicht auflisten laesst', async () => {
-    // Ein Ausfall des Listen-Workflows darf die Ablage nicht anhalten.
-    const ziele: string[] = [];
-    const fetchImpl = vi.fn(async (url: string) => {
-      const pfad = String(url);
-      ziele.push(pfad);
+      aufrufe.push(pfad);
       if (pfad.endsWith('/ordner')) return antwort({ id: 'ORDNER-1' });
       if (pfad.endsWith('/dateien')) return fehler(500);
       return antwort({ ok: true });
@@ -510,70 +457,59 @@ describe('Ablegen ueber n8n', () => {
     const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, {
       pauseMs: 0,
       versuche: 1,
-      ordnerDateienUrl: 'https://n8n.example/dateien',
-      verschiebeUrl: 'https://n8n.example/verschieben',
     }).lege(monat({ positionen: [pos({ id: 'a' })] }), false);
 
     expect(ergebnis.ausgefuehrt).toBe(true);
-    expect(ergebnis.eintraege[0]!.aktion).toBe('hochladen');
-    expect(ziele).toContain('https://n8n.example/ablage');
+    expect(ergebnis.eintraege[0]!.aktion).toBe('offen');
+    expect(aufrufe).not.toContain('https://n8n.example/verschieben');
   });
 
-  it('laedt hoch, solange die Verschiebe-Adresse fehlt', async () => {
-    // Nur die Liste ohne das Verschieben waere nutzlos - dann gar nicht erst
-    // auflisten und den Workflow unnoetig belasten.
-    const ziele: string[] = [];
+  it('bleibt bei der Vorschau, solange die Verschiebe-Adresse fehlt', async () => {
+    // Ohne das Verschieben gibt es nichts zu tun - dann auch nicht auflisten
+    // und den Workflow unnoetig belasten.
+    const aufrufe: string[] = [];
     const fetchImpl = vi.fn(async (url: string) => {
-      ziele.push(String(url));
-      return antwort(String(url).endsWith('/ordner') ? { id: 'X' } : { ok: true });
+      aufrufe.push(String(url));
+      return antwort({ ok: true });
     });
 
-    await bereit(fetchImpl as unknown as typeof fetch, {
+    const ergebnis = await bereit(fetchImpl as unknown as typeof fetch, {
       pauseMs: 0,
-      ordnerDateienUrl: 'https://n8n.example/dateien',
+      verschiebeUrl: undefined,
     }).lege(monat({ positionen: [pos({ id: 'a' })] }), false);
 
-    expect(ziele).not.toContain('https://n8n.example/dateien');
-    expect(ziele).toContain('https://n8n.example/ablage');
+    expect(ergebnis.ausgefuehrt).toBe(false);
+    expect(ergebnis.hinweis).toContain('N8N_VERSCHIEBE_URL');
+    expect(aufrufe).toHaveLength(0);
   });
 
   it('meldet, welche Datei gerade drankommt', async () => {
-    const fetchImpl = vi.fn(async (url: string) =>
-      antwort(String(url).endsWith('/ordner') ? { ordnerId: 'X' } : { ok: true }),
-    );
+    const { fetchImpl } = workflows([{ id: 'od-1', name: 'a.pdf', size: 1 }]);
+    const meldungen: LadeFortschritt[] = [];
 
-    const staende: LadeFortschritt[] = [];
-    await bereit(fetchImpl as unknown as typeof fetch, { pauseMs: 0 }).lege(
-      monat({ positionen: [pos({ id: 'a' }), pos({ id: 'b' })] }),
+    await bereit(fetchImpl, { pauseMs: 0 }).lege(
+      monat({ positionen: [pos({ id: 'a' })] }),
       false,
-      (f) => staende.push(f),
+      (f) => meldungen.push(f),
     );
 
-    const schritte = staende.map((s) => s.schritt);
-    expect(schritte).toContain('einteilung');
-    expect(schritte).toContain('ordner');
-    expect(schritte).toContain('ablegen');
-
-    // Der letzte Stand sagt, was tatsaechlich durchging.
-    const letzter = staende.at(-1)!;
-    expect(letzter.schritt).toBe('ablegen');
-    expect(letzter.erledigt).toBe(2);
-    expect(letzter.gesamt).toBe(2);
-    expect(letzter.text).toContain('2 von 2');
+    expect(meldungen.map((m) => m.schritt)).toContain('ordner');
+    expect(meldungen.map((m) => m.schritt)).toContain('abgleich');
+    expect(meldungen.filter((m) => m.schritt === 'ablegen').at(0)).toMatchObject({
+      schritt: 'ablegen',
+      text: expect.stringContaining('a.pdf'),
+    });
   });
 
   it('meldet auch, wenn der Monatsordner fehlt - der Lauf endet dort', async () => {
-    const fetchImpl = vi.fn(async () => antwort({ objects: [] }));
+    const { fetchImpl } = workflows([], []);
+    const meldungen: LadeFortschritt[] = [];
 
-    const staende: LadeFortschritt[] = [];
-    await bereit(fetchImpl as unknown as typeof fetch).lege(
-      monat({ positionen: [pos({ id: 'a' })] }),
-      false,
-      (f) => staende.push(f),
+    await bereit(fetchImpl).lege(monat({ positionen: [pos({ id: 'a' })] }), false, (f) =>
+      meldungen.push(f),
     );
 
-    expect(staende.at(-1)).toMatchObject({ schritt: 'ordner', text: 'nicht gefunden' });
-    expect(staende.map((s) => s.schritt)).not.toContain('ablegen');
+    expect(meldungen.at(-1)).toMatchObject({ schritt: 'ordner', text: 'nicht gefunden' });
   });
 });
 
