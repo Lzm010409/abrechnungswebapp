@@ -303,14 +303,19 @@ POST [{ "ordnerId": "017CTAN…" }]
 →    [ { "id": "01ABC…", "name": "Scan_20260622.pdf", "size": 8421 }, … ]
 
 POST { "ordnerId": "017CTAN…", "unterordner": "Konto", "dateiId": "01ABC…" }
-→    das verschobene Element, oder 404 wenn es den Unterordner nicht gibt
+→    das verschobene Element
 ```
 
 > Beide antworten über einen **Respond-to-Webhook**-Knoten, nicht über *Last
 > Node*. Beim Auflisten ist das zwingend: *Last Node* gäbe nur den **ersten**
-> Eintrag zurück statt der ganzen Liste. Fehlt der Zielordner beim Verschieben,
-> kommt bewusst ein **404** mit Meldung — sonst wäre ein fehlgeschlagenes
-> Verschieben von einem erfolgreichen nicht zu unterscheiden.
+> Eintrag zurück statt der ganzen Liste.
+
+> **Fehlt der Zielordner, wird er angelegt.** Bis August 2026 antwortete der
+> Verschiebe-Workflow stattdessen mit 404 — in einem frisch begonnenen Monat
+> existieren `Konto`, `Bar` und `Tanken` aber noch gar nicht, dort ließ sich
+> also überhaupt nichts einsortieren. Schlägt das Anlegen fehl, kommt ein 500
+> mit Meldung zurück; ein stillschweigend gescheitertes Verschieben soll es
+> nicht geben.
 
 Die Liste wird gelesen wie überall bei n8n — ohne feste Feldnamen. Erkannt
 werden `id`/`itemId`/`driveItemId`, `name`/`filename`, `size`, dazu `cTag` und
